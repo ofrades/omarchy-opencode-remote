@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.ofrades.opencode-remote",
+  "name": "OpenCode Remote",
+  "version": "0.4.0",
+  "author": "ofrades",
+  "license": "MIT",
+  "description": "Pick any opencode session from any tailnet machine in one bar picker.",
+  "homepage": "https://github.com/ofrades/omarchy-opencode-remote",
+  "repository": "https://github.com/ofrades/omarchy-opencode-remote",
+  "keywords": [
+    "opencode",
+    "tailscale",
+    "sessions",
+    "remote"
+  ],
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "OpenCode Remote",
+    "description": "List opencode sessions across Tailscale machines and open them in a terminal.",
+    "category": "AI",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 60
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 10,
+        "max": 3600,
+        "step": 5,
+        "defaultValue": 60
+      }
+    ]
+  }
+}

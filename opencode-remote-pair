@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+"""One-click tailnet pairing for omarchy-opencode-remote.
+
+Usage:
+  opencode-remote-pair send <peer-host>   Expose this machine's opencode
+                                          server and Taildrop the credential
+                                          to <peer-host> for one-click trust.
+  opencode-remote-pair trust <file>       Trust an incoming pairing file from
+                                          ~/Downloads: stores the peer's
+                                          credential and deletes the file.
+
+`send` reuses the existing service password when there is one and only
+generates a fresh secret on first use, so pairing a second peer never
+locks out the first. The server binds the tailnet IPv4 (falling back to
+all interfaces only when Tailscale is down), so nothing is exposed to the
+LAN on purpose.
+"""
+
+import json
+import os
+import secrets
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+PAIR_APP_TAG = "omarchy-opencode-remote-pair"
+
+
+def fail(message):
+    print("opencode-remote-pair: %s" % message, file=sys.stderr)
+    return 1
+
+
+def config_home():
+    override = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    if override:
+        return override
+    return os.path.join(os.path.expanduser("~"), ".config")
+
+
+def widget_config_path():
+    return os.path.join(config_home(), "omarchy-opencode-remote", "config.json")
+
+
+def service_config_path():
+    return os.path.join(config_home(), "opencode", "service.json")
+
+
+def run(command, timeout):
+    try:
+        completed = subprocess.run(
+            command, check=False, capture_output=True, text=True, timeout=timeout
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, ""
+    return completed.returncode, (completed.stdout or "").strip()
+
+
+def load_json_file(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def write_json_file(path, data):
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=directory or ".", prefix=".tmp-pair-")
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+            handle.write("\n")
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+    os.chmod(path, 0o600)
+
+
+def tail_ipv4():
+    tailscale_bin = shutil.which("tailscale")
+    if not tailscale_bin:
+        return ""
+    exit_code, out = run([tailscale_bin, "ip", "-4"], 8)
+    if exit_code != 0 or not out:
+        return ""
+    return out.split()[0]
+
+
+def tail_self_name():
+    tailscale_bin = shutil.which("tailscale")
+    if not tailscale_bin:
+        return ""
+    exit_code, out = run([tailscale_bin, "status", "--json"], 8)
+    if exit_code != 0 or not out:
+        return ""
+    try:
+        status = json.loads(out)
+    except ValueError:
+        return ""
+    yourself = status.get("Self", {}) or {}
+    return str(yourself.get("HostName", "") or "")
+
+
+def widget_config():
+    raw = load_json_file(widget_config_path())
+    config = {"password": "", "port": 49374, "timeoutSec": 3, "peers": {}}
+    if raw:
+        if isinstance(raw.get("password"), str):
+            config["password"] = raw["password"]
+        try:
+            port = int(raw.get("port", 49374))
+            if 1 <= port <= 65535:
+                config["port"] = port
+        except (TypeError, ValueError):
+            pass
+        try:
+            timeout = int(raw.get("timeoutSec", 3))
+            config["timeoutSec"] = max(1, min(15, timeout))
+        except (TypeError, ValueError):
+            pass
+        peers = raw.get("peers", {}) or {}
+        if isinstance(peers, dict):
+            for name, entry in peers.items():
+                if isinstance(entry, dict) and entry.get("password"):
+                    config["peers"][str(name)] = dict(entry)
+    return config
+
+
+def service_password():
+    raw = load_json_file(service_config_path())
+    if raw and isinstance(raw.get("password"), str) and raw["password"]:
+        return raw["password"]
+    return ""
+
+
+def service_status_url(opencode_bin):
+    exit_code, out = run([opencode_bin, "service", "status"], 8)
+    if exit_code != 0 or not out:
+        return ""
+    for token in out.split():
+        if token.startswith("http://") or token.startswith("https://"):
+            return token.rstrip("/")
+    return ""
+
+
+def cmd_send(peer):
+    opencode_bin = shutil.which("opencode")
+    if not opencode_bin:
+        return fail("opencode is not installed")
+    tailscale_bin = shutil.which("tailscale")
+    if not tailscale_bin:
+        return fail("tailscale is not installed")
+    if not peer:
+        return fail("usage: opencode-remote-pair send <peer-host>")
+
+    config = widget_config()
+    password = service_password()
+    if not password:
+        password = secrets.token_urlsafe(32)
+        exit_code, _ = run(
+            [opencode_bin, "service", "set", "password", password], 15
+        )
+        if exit_code != 0:
+            return fail("could not set the service password")
+
+    bind = tail_ipv4()
+    if bind:
+        exit_code, _ = run([opencode_bin, "service", "set", "hostname", bind], 15)
+        if exit_code != 0:
+            return fail("could not bind the service to the tailnet address")
+    else:
+        exit_code, _ = run([opencode_bin, "service", "set", "hostname", "0.0.0.0"], 15)
+        if exit_code != 0:
+            return fail("could not bind the service")
+
+    exit_code, _ = run(
+        [opencode_bin, "service", "set", "port", str(config["port"])], 15
+    )
+    if exit_code != 0:
+        return fail("could not set the service port")
+    # Changing settings stops the service; bring it back with the new config.
+    exit_code, _ = run([opencode_bin, "service", "start"], 30)
+    if exit_code != 0:
+        return fail("could not start the background service")
+
+    url = service_status_url(opencode_bin)
+    if not url:
+        return fail("service started but its URL is unknown")
+    try:
+        port = int(url.rsplit(":", 1)[1])
+    except (ValueError, IndexError):
+        port = config["port"]
+
+    credential = {
+        "app": PAIR_APP_TAG,
+        "v": 1,
+        "host": tail_self_name() or "unknown",
+        "tailIP": tail_ipv4(),
+        "port": port,
+        "username": "opencode",
+        "password": password,
+        "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    staging_fd, staging = tempfile.mkstemp(
+        prefix="opencode-pair-%s-" % credential["host"], suffix=".json"
+    )
+    try:
+        with os.fdopen(staging_fd, "w", encoding="utf-8") as handle:
+            json.dump(credential, handle, indent=2)
+            handle.write("\n")
+        os.chmod(staging, 0o600)
+        exit_code, _ = run([tailscale_bin, "file", "cp", staging, peer + ":"], 60)
+        if exit_code != 0:
+            return fail(
+                "could not send to '%s' — is that peer online?" % peer
+            )
+    finally:
+        try:
+            os.unlink(staging)
+        except OSError:
+            pass
+
+    print("Pairing sent to %s — ask them to click Trust in the widget." % peer)
+    if not bind:
+        print("Note: bound to all interfaces (Tailscale was unreachable).")
+    return 0
+
+
+def cmd_trust(path):
+    raw = load_json_file(path)
+    if raw is None or raw.get("app") != PAIR_APP_TAG:
+        return fail("'%s' is not a pairing file" % path)
+    host = raw.get("host", "")
+    tail_ip = raw.get("tailIP", "")
+    password = raw.get("password", "")
+    try:
+        port = int(raw.get("port", 0))
+    except (TypeError, ValueError):
+        port = 0
+    if not host or not tail_ip or not password or not 1 <= port <= 65535:
+        return fail("pairing file is incomplete")
+    if os.path.basename(path).startswith("."):
+        return fail("refusing a hidden file")
+
+    config = widget_config()
+    peers = config["peers"]
+    peers[str(host)] = {"password": password, "port": port}
+    write_json_file(
+        widget_config_path(),
+        {
+            "password": config["password"],
+            "port": config["port"],
+            "timeoutSec": config["timeoutSec"],
+            "peers": peers,
+        },
+    )
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    print("Trusted %s (%s:%d) — its sessions will appear on refresh." % (host, tail_ip, port))
+    return 0
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] in ("-h", "--help"):
+        print("Usage: opencode-remote-pair send <peer-host> | trust <file>")
+        return 0 if len(argv) >= 2 else 1
+    action = argv[1]
+    if action == "send":
+        return cmd_send(argv[2] if len(argv) > 2 else "")
+    if action == "trust":
+        if len(argv) < 3:
+            return fail("usage: opencode-remote-pair trust <file>")
+        return cmd_trust(argv[2])
+    # The widget never passes secrets on a command line, so there is no
+    # code path here that accepts a password argument on purpose.
+    return fail("unknown action '%s'" % action)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
