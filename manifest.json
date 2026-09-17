@@ -24,6 +24,10 @@
     "displayName": "OpenCode Remote",
     "description": "List opencode sessions across Tailscale machines and open them in a terminal.",
     "category": "AI",
+    "aliases": [
+      "opencode-remote",
+      "remote-sessions"
+    ],
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
