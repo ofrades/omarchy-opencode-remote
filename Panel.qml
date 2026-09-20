@@ -147,9 +147,7 @@ Panel {
               elide: Text.ElideMiddle
             }
 
-            ActionRow { visible: service.published; title: "Open dashboard"; subtitle: "Open the published OpenCode UI"; onClicked: { service.openDashboard(); root.close() } }
-            ActionRow { visible: service.published; title: "Copy URL"; subtitle: "Share the tailnet-only address"; onClicked: service.copyUrl() }
-            ActionRow { visible: service.published; title: "Show login QR"; subtitle: "Connect OpenCode Mobile"; onClicked: service.showQr() }
+            ActionRow { visible: service.published; title: "Open dashboard"; subtitle: "Open OpenCode in your browser"; onClicked: { service.openDashboard(); root.close() } }
           }
 
           Column {

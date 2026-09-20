@@ -77,18 +77,6 @@ Item {
   function openPeer(peer) { openUrl(peer && peer.url ? peer.url : "") }
   function openSession(session) { openUrl(session && session.webUrl ? session.webUrl : publicUrl) }
 
-  function copyUrl() {
-    if (publicUrl === "") return
-    actionStatus = "URL copied"
-    copyProcess.command = ["wl-copy", publicUrl]
-    copyProcess.running = true
-  }
-
-  function showQr() {
-    if (publicUrl === "") return
-    Quickshell.execDetached(["omarchy-launch-terminal", "sh", "-c", "opencode pair --url '" + publicUrl + "'; printf '\\nPress Enter to close '; read _"])
-  }
-
   Timer { interval: root.refreshIntervalSec * 1000; repeat: true; running: true; triggeredOnStart: true; onTriggered: root.refresh() }
   Timer { id: delayedRefresh; interval: 1000; repeat: false; onTriggered: root.refresh() }
   Timer { id: statusTimer; interval: 2600; repeat: false; onTriggered: root.actionStatus = "" }
@@ -119,12 +107,5 @@ Item {
       statusTimer.restart()
       delayedRefresh.restart()
     }
-  }
-
-  Process {
-    id: copyProcess
-    command: []
-    stdout: StdioCollector { waitForEnd: true }
-    stderr: StdioCollector { waitForEnd: true }
   }
 }

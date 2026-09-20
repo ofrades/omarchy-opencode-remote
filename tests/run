@@ -87,6 +87,10 @@ if grep -RniE 'Taildrop|pairingInbox|trustPairing|peer_credentials|openRemoteSes
   echo "FAIL: credential-exchange code remains" >&2
   exit 1
 fi
+if grep -RniE 'copyUrl|showQr|Show login QR|Copy URL' -- README.md Service.qml Panel.qml; then
+  echo "FAIL: removed URL sharing controls remain" >&2
+  exit 1
+fi
 echo OK
 
 if command -v omarchy >/dev/null 2>&1; then

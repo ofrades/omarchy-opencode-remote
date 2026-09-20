@@ -11,6 +11,8 @@
 - Active sessions now open in the published OpenCode web UI.
 - Restored read-only discovery of OpenCode servers published by online
   Tailscale peers, with browser navigation and no credential exchange.
+- Simplified the local panel to one primary browser action by removing URL
+  copy and login QR controls.
 
 ## 0.5.0
 

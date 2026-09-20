@@ -41,8 +41,6 @@ omarchy plugin add https://github.com/ofrades/omarchy-opencode-remote.git --enab
 Open the widget and choose **Publish this machine**. Once healthy, use:
 
 - **Open dashboard** to launch the web UI.
-- **Copy URL** to share the tailnet-only address.
-- **Show login QR** for OpenCode Mobile.
 - An active or historical session row to open that session in the browser.
 
 The optional port lives in
