@@ -2,23 +2,23 @@
 """One-click tailnet pairing for omarchy-opencode-remote.
 
 Usage:
-  opencode-remote-pair send <peer-host>   Expose this machine's opencode
-                                          server and Taildrop the credential
-                                          to <peer-host> for one-click trust.
+  opencode-remote-pair send [peer-host] Expose this machine's opencode
+                                          server at https://<host>.<tailnet>.ts.net/
+                                          (no password, tailnet-only). With a
+                                          peer, also Taildrop a no-auth notice
+                                          for one-click trust.
   opencode-remote-pair trust <file>       Trust an incoming pairing file from
-                                          ~/Downloads: stores the peer's
-                                          credential and deletes the file.
+                                          ~/Downloads: stores the peer and
+                                          deletes the file.
 
-`send` reuses the existing service password when there is one and only
-generates a fresh secret on first use, so pairing a second peer never
-locks out the first. The server binds the tailnet IPv4 (falling back to
-all interfaces only when Tailscale is down), so nothing is exposed to the
-LAN on purpose.
+`send` binds the tailnet address, restarts the service, maps the tailnet
+URL with `tailscale serve`, and Taildrops the effective credential so the
+peer lists this machine. It never touches the password: opencode enforces
+one on the background service, so it stays stable across exposes.
 """
 
 import json
 import os
-import secrets
 import shutil
 import subprocess
 import sys
@@ -96,6 +96,57 @@ def tail_ipv4():
     return out.split()[0]
 
 
+def _looks_like_ipv4(value):
+    parts = value.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        return all(0 <= int(part) <= 255 for part in parts)
+    except ValueError:
+        return False
+
+
+def peer_target(peer):
+    """Resolve a tailnet peer to a Taildrop target (MagicDNS name or IP).
+
+    Display HostNames can contain spaces and never resolve as DNS, so look
+    the peer up in `tailscale status --json` first. IPs pass through.
+    Returns (label, target); target is "" when unresolvable.
+    """
+    if not peer:
+        return "", ""
+    if ":" in peer or _looks_like_ipv4(peer):
+        return peer, peer
+    tailscale_bin = shutil.which("tailscale")
+    if not tailscale_bin:
+        return peer, ""
+    exit_code, out = run([tailscale_bin, "status", "--json"], 8)
+    if exit_code != 0 or not out:
+        return peer, ""
+    try:
+        status = json.loads(out)
+    except ValueError:
+        return peer, ""
+    peers = status.get("Peer", {}) or {}
+    wanted = peer.lower()
+    for entry in peers.values():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("HostName", "") or "").lower() != wanted:
+            continue
+        host = str(entry.get("HostName", "") or peer)
+        dns = str(entry.get("DNSName", "") or "").rstrip(".")
+        if dns:
+            return host, dns
+        ips = entry.get("TailscaleIPs", []) or []
+        for ip in ips:
+            if "." in str(ip):
+                return host, str(ip)
+        if ips:
+            return host, str(ips[0])
+    return peer, ""
+
+
 def tail_self_name():
     tailscale_bin = shutil.which("tailscale")
     if not tailscale_bin:
@@ -131,7 +182,7 @@ def widget_config():
         peers = raw.get("peers", {}) or {}
         if isinstance(peers, dict):
             for name, entry in peers.items():
-                if isinstance(entry, dict) and entry.get("password"):
+                if isinstance(entry, dict) and isinstance(entry.get("password"), str):
                     config["peers"][str(name)] = dict(entry)
     return config
 
@@ -153,6 +204,22 @@ def service_status_url(opencode_bin):
     return ""
 
 
+def serve_dns_name():
+    """This machine's MagicDNS name (no trailing dot), or ''."""
+    tailscale_bin = shutil.which("tailscale")
+    if not tailscale_bin:
+        return ""
+    exit_code, out = run([tailscale_bin, "status", "--json"], 8)
+    if exit_code != 0 or not out:
+        return ""
+    try:
+        status = json.loads(out)
+    except ValueError:
+        return ""
+    yourself = status.get("Self", {}) or {}
+    return str(yourself.get("DNSName", "") or "").rstrip(".")
+
+
 def cmd_send(peer):
     opencode_bin = shutil.which("opencode")
     if not opencode_bin:
@@ -161,18 +228,15 @@ def cmd_send(peer):
     if not tailscale_bin:
         return fail("tailscale is not installed")
     if not peer:
-        return fail("usage: opencode-remote-pair send <peer-host>")
-
+        peer = ""
     config = widget_config()
-    password = service_password()
-    if not password:
-        password = secrets.token_urlsafe(32)
-        exit_code, _ = run(
-            [opencode_bin, "service", "set", "password", password], 15
-        )
-        if exit_code != 0:
-            return fail("could not set the service password")
+    # Never manage the password: opencode enforces one on the background
+    # service and regenerates it on start when missing. We leave it alone
+    # and share whatever is effective after start, so it stays stable.
 
+    # Bind the tailnet address so desktops can probe directly; the
+    # MagicDNS URL (via `tailscale serve` below) is the prettier path.
+    # Either way auth is required — opencode guarantees a password.
     bind = tail_ipv4()
     if bind:
         exit_code, _ = run([opencode_bin, "service", "set", "hostname", bind], 15)
@@ -200,6 +264,26 @@ def cmd_send(peer):
         port = int(url.rsplit(":", 1)[1])
     except (ValueError, IndexError):
         port = config["port"]
+    # Effective password post-start (opencode guarantees one exists).
+    password = service_password()
+    target = "http://%s:%d" % (bind if bind else "127.0.0.1", port)
+
+    # Pair the server to its tailnet URL: https://<host>.<tailnet>.ts.net/
+    serve_note = ""
+    exit_code, _ = run(
+        [tailscale_bin, "serve", "--bg", "--https=443", target], 30
+    )
+    if exit_code != 0:
+        serve_note = " (tailscale serve failed — direct http://<tailnet-ip>:%d still works)" % port
+    else:
+        dns = serve_dns_name()
+        serve_note = " — https://%s" % dns if dns else " — https enabled"
+
+    if not peer:
+        print("Exposed on the tailnet%s — no password." % serve_note)
+        if not bind:
+            print("Note: bound to all interfaces (Tailscale was unreachable).")
+        return 0
 
     credential = {
         "app": PAIR_APP_TAG,
@@ -219,10 +303,13 @@ def cmd_send(peer):
             json.dump(credential, handle, indent=2)
             handle.write("\n")
         os.chmod(staging, 0o600)
-        exit_code, _ = run([tailscale_bin, "file", "cp", staging, peer + ":"], 60)
+        _host, target = peer_target(peer)
+        if not target:
+            return fail("could not resolve tailnet peer '%s'" % peer)
+        exit_code, _ = run([tailscale_bin, "file", "cp", staging, target + ":"], 60)
         if exit_code != 0:
             return fail(
-                "could not send to '%s' — is that peer online?" % peer
+                "could not send to '%s' — is that peer online and accepting files?" % peer
             )
     finally:
         try:
@@ -230,7 +317,7 @@ def cmd_send(peer):
         except OSError:
             pass
 
-    print("Pairing sent to %s — ask them to click Trust in the widget." % peer)
+    print("Exposed on the tailnet%s — pairing sent to %s, ask them to click Trust." % (serve_note, peer))
     if not bind:
         print("Note: bound to all interfaces (Tailscale was unreachable).")
     return 0
@@ -243,11 +330,13 @@ def cmd_trust(path):
     host = raw.get("host", "")
     tail_ip = raw.get("tailIP", "")
     password = raw.get("password", "")
+    if not isinstance(password, str):
+        return fail("pairing file is incomplete")
     try:
         port = int(raw.get("port", 0))
     except (TypeError, ValueError):
         port = 0
-    if not host or not tail_ip or not password or not 1 <= port <= 65535:
+    if not host or not tail_ip or not 1 <= port <= 65535:
         return fail("pairing file is incomplete")
     if os.path.basename(path).startswith("."):
         return fail("refusing a hidden file")
@@ -274,7 +363,7 @@ def cmd_trust(path):
 
 def main(argv):
     if len(argv) < 2 or argv[1] in ("-h", "--help"):
-        print("Usage: opencode-remote-pair send <peer-host> | trust <file>")
+        print("Usage: opencode-remote-pair send [peer-host] | trust <file>")
         return 0 if len(argv) >= 2 else 1
     action = argv[1]
     if action == "send":

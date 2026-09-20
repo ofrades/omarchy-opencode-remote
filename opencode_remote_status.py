@@ -79,7 +79,7 @@ def load_config():
                     if not isinstance(entry, dict):
                         continue
                     password = entry.get("password", "")
-                    if not isinstance(password, str) or not password:
+                    if not isinstance(password, str):
                         continue
                     try:
                         peer_port = int(entry.get("port", config["port"]))
@@ -92,14 +92,20 @@ def load_config():
 
 
 def peer_credentials(config, host_name):
-    """Per-peer password from pairing, else the shared global password."""
+    """Per-peer credential, else the shared global one. Empty means no auth."""
     entry = config["peers"].get(host_name, {})
-    password = entry.get("password", "") if isinstance(entry, dict) else ""
-    port = entry.get("port", config["port"]) if isinstance(entry, dict) else config["port"]
-    if not password:
-        password = config["password"]
-        port = config["port"]
-    return password, port
+    if isinstance(entry, dict) and "password" in entry:
+        password = entry.get("password", "")
+        if not isinstance(password, str):
+            password = ""
+        try:
+            port = int(entry.get("port", config["port"]))
+        except (TypeError, ValueError):
+            port = config["port"]
+        if not 1 <= port <= 65535:
+            port = config["port"]
+        return password, port
+    return config["password"], config["port"]
 
 
 def command_output(command, timeout):
@@ -235,7 +241,7 @@ def list_sessions(base_url, password, timeout, only_active=False):
 
 def tailscale_status(tailscale_bin):
     result = {"installed": tailscale_bin is not None, "running": False,
-              "selfName": "", "selfIps": [], "rawPeers": []}
+              "selfName": "", "selfDns": "", "selfIps": [], "rawPeers": []}
     if not tailscale_bin:
         return result
     exit_code, out = command_output([tailscale_bin, "status", "--json"], 8)
@@ -248,6 +254,7 @@ def tailscale_status(tailscale_bin):
     result["running"] = status.get("BackendState") == "Running"
     yourself = status.get("Self", {}) or {}
     result["selfName"] = str(yourself.get("HostName", "") or "")
+    result["selfDns"] = str(yourself.get("DNSName", "") or "").rstrip(".")
     ips = yourself.get("TailscaleIPs", []) or []
     result["selfIps"] = [str(ip) for ip in ips]
     peers = status.get("Peer", {}) or {}
@@ -289,7 +296,9 @@ def pairing_inbox():
         host = raw.get("host", "")
         tail_ip = raw.get("tailIP", "")
         password = raw.get("password", "")
-        if not host or not tail_ip or not password:
+        if not host or not tail_ip:
+            continue
+        if not isinstance(password, str):
             continue
         try:
             port = int(raw.get("port", DEFAULT_PORT))
@@ -297,7 +306,11 @@ def pairing_inbox():
             continue
         if not 1 <= port <= 65535:
             continue
-        digest = hashlib.sha256(password.encode("utf-8")).hexdigest()[:12]
+        digest = (
+            hashlib.sha256(password.encode("utf-8")).hexdigest()[:12]
+            if password
+            else "no-auth"
+        )
         inbox.append(
             {
                 "file": path,
@@ -335,7 +348,7 @@ def payload():
             "hasPassword": config["password"] != "",
             "port": config["port"],
         },
-        "local": {"reachable": False, "url": "", "error": "", "sessions": [], "history": [], "total": 0},
+        "local": {"reachable": False, "url": "", "serveUrl": "", "error": "", "sessions": [], "history": [], "total": 0},
         "tailscale": {
             "installed": tailscale_bin is not None,
             "running": False,
@@ -355,19 +368,15 @@ def payload():
         url = service_status_url(opencode_bin)
         if url:
             password = local_password()
-            if not password:
-                data["local"]["url"] = url
-                data["local"]["error"] = "could not read service password"
-            else:
-                ok, error, sessions, history, total = list_sessions(
-                    url, password, config["timeoutSec"], only_active=True
-                )
-                data["local"]["url"] = url
-                data["local"]["reachable"] = ok
-                data["local"]["error"] = error
-                data["local"]["sessions"] = sessions
-                data["local"]["history"] = history
-                data["local"]["total"] = total
+            ok, error, sessions, history, total = list_sessions(
+                url, password, config["timeoutSec"], only_active=True
+            )
+            data["local"]["url"] = url
+            data["local"]["reachable"] = ok
+            data["local"]["error"] = error
+            data["local"]["sessions"] = sessions
+            data["local"]["history"] = history
+            data["local"]["total"] = total
         else:
             data["local"]["error"] = "background service not running"
     else:
@@ -377,6 +386,10 @@ def payload():
     data["tailscale"]["running"] = tail["running"]
     data["tailscale"]["selfName"] = tail["selfName"]
     data["tailscale"]["selfIps"] = tail["selfIps"]
+    if tail["selfDns"]:
+        _serve_code, _serve_out = command_output([tailscale_bin, "serve", "status"], 8) if tailscale_bin else (1, "")
+        if _serve_code == 0 and "No serve config" not in _serve_out:
+            data["local"]["serveUrl"] = "https://%s/" % tail["selfDns"]
 
     for peer in tail["rawPeers"]:
         entry = dict(peer)
@@ -390,21 +403,30 @@ def payload():
             entry["error"] = "opencode is not installed"
         else:
             password, port = peer_credentials(config, peer["hostName"])
-            if not password:
-                entry["error"] = "not paired yet"
+            ip = first_ip(peer["ips"])
+            dns = str(peer.get("dnsName", "") or "").rstrip(".")
+            # Each server is paired to its tailnet URL via `tailscale serve`,
+            # so prefer https://<host>.<tailnet>.ts.net/ and fall back to
+            # the raw tailnet IP for machines without serve configured.
+            candidates = []
+            if dns:
+                candidates.append("https://%s" % dns)
+            if ip:
+                candidates.append("http://%s:%d" % (ip, port))
+            if not candidates:
+                entry["error"] = "no tailscale address"
             else:
-                ip = first_ip(peer["ips"])
-                if not ip:
-                    entry["error"] = "no tailscale ip"
-                else:
-                    url = "http://%s:%d" % (ip, port)
+                ok, error, sessions = False, "", []
+                for url in candidates:
                     entry["url"] = url
                     ok, error, sessions, _history, _total = list_sessions(
                         url, password, config["timeoutSec"]
                     )
-                    entry["reachable"] = ok
-                    entry["error"] = error
-                    entry["sessions"] = sessions
+                    if ok:
+                        break
+                entry["reachable"] = ok
+                entry["error"] = error
+                entry["sessions"] = sessions
         data["tailscale"]["peers"].append(entry)
 
     return data

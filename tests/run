@@ -96,6 +96,23 @@ else
   echo "(node missing, skipping Model.js tests)"
 fi
 
+echo "== serveUrl =="
+node -e "
+const M = require('./Model.js');
+const d = M.defaultStatus();
+console.assert(d.local.serveUrl === '', 'default serveUrl');
+const p = M.parseStatus(JSON.stringify({ local: { reachable: true, url: 'http://100.9.9.9:49374', serveUrl: 'https://laptop.example.ts.net/' } }));
+console.assert(p.local.serveUrl === 'https://laptop.example.ts.net/', 'serveUrl parse');
+console.assert(p.local.url === 'http://100.9.9.9:49374', 'url kept');
+console.log('serveUrl OK');
+"
+python3 -c "
+import json, subprocess
+d = json.loads(subprocess.run(['python3', 'opencode_remote_status.py'], check=True, capture_output=True, text=True).stdout)
+assert 'serveUrl' in d['local'], 'serveUrl missing from helper payload'
+print('helper serveUrl:', repr(d['local']['serveUrl']))
+"
+
 if command -v omarchy >/dev/null 2>&1; then
   echo "== omarchy plugin validate =="
   omarchy plugin validate .

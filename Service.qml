@@ -19,6 +19,7 @@ Item {
 
   property bool localReachable: false
   property string localUrl: ""
+  property string localServeUrl: ""
   property string localError: ""
   property var localSessions: []
   property var localHistory: []
@@ -107,6 +108,7 @@ Item {
     configPort = parsed.config.port
     localReachable = parsed.local.reachable
     localUrl = parsed.local.url
+    localServeUrl = parsed.local.serveUrl
     localError = parsed.local.error
     localSessions = parsed.local.sessions
     localHistory = parsed.local.history
@@ -143,6 +145,28 @@ Item {
   // Launchers, not tracked operations: they must not flip `busy` and carry
   // no status. The password never appears here — opencode-remote-connect
   // reads it from the 0600 config file itself.
+  // Shareable URL + phone QR. serveUrl is the tailscale-serve HTTPS URL
+  // when configured, otherwise the direct server URL.
+  readonly property string shareUrl: localServeUrl !== "" ? localServeUrl : localUrl
+
+  function copyShareUrl() {
+    if (shareUrl === "") {
+      lastError = "No server URL yet — expose this machine first"
+      return
+    }
+    runAction("URL copied", ["wl-copy", shareUrl])
+  }
+
+  function showPhoneQr() {
+    if (shareUrl === "") {
+      lastError = "No server URL yet — expose this machine first"
+      return
+    }
+    selectSession("", "")
+    launcherProcess.command = ["omarchy-launch-terminal", "sh", "-c", "opencode pair --url '" + shareUrl + "'; printf '\\nPress Enter to close '; read _"]
+    launcherProcess.running = true
+  }
+
   function openLocalSession(sessionId) {
     selectSession("", sessionId)
     var command = ["omarchy-launch-terminal", "opencode"]
@@ -192,7 +216,7 @@ Item {
       lastError = "Pick an online Tailscale machine first"
       return
     }
-    runAction("Pairing with " + name, [pairPath, "send", name])
+    runAction("Exposing on tailnet", [pairPath, "send", name])
   }
 
   function trustPairing(file, host) {

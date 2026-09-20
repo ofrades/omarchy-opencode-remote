@@ -52,12 +52,15 @@ def load_config():
 
 
 def credentials_for(config_password, config_port, peers, host, ip):
-    """Pairing entry (by hostname, then by IP) wins over the shared secret."""
+    """Pairing entry (by hostname, then by IP) wins over the shared secret.
+
+    An explicit entry with an empty password means no auth (tailnet-only).
+    """
     for key in (host, ip):
         if not key:
             continue
         entry = peers.get(key)
-        if isinstance(entry, dict) and entry.get("password"):
+        if isinstance(entry, dict) and isinstance(entry.get("password"), str):
             try:
                 port = int(entry.get("port", config_port))
             except (TypeError, ValueError):
@@ -127,11 +130,6 @@ def main(argv):
     if not ip:
         return fail("could not resolve tailnet peer '%s'" % peer)
     password, port = credentials_for(config_password, config_port, peers, host, ip)
-    if not password:
-        return fail(
-            "no credential for '%s' in %s — pair with it from the widget first"
-            % (host, config_path)
-        )
     opencode_bin = shutil.which("opencode")
     if not opencode_bin:
         return fail("opencode is not installed")
@@ -141,7 +139,10 @@ def main(argv):
     if session_id and session_id != "-":
         command += ["--session", session_id]
     env = dict(os.environ)
-    env["OPENCODE_SERVER_PASSWORD"] = password
+    if password:
+        env["OPENCODE_SERVER_PASSWORD"] = password
+    else:
+        env.pop("OPENCODE_SERVER_PASSWORD", None)
     os.execvpe(opencode_bin, command, env)
     return 1
 

@@ -241,6 +241,31 @@ Panel {
             }
 
             Text {
+              visible: sessions.shareUrl !== "" && root.currentTab === "local"
+              width: parent.width
+              textFormat: Text.PlainText
+              text: sessions.shareUrl
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideMiddle
+            }
+
+            ActionRow {
+              visible: sessions.shareUrl !== "" && root.currentTab === "local"
+              title: "Copy server URL"
+              subtitle: "Paste it into the phone app"
+              onClicked: sessions.copyShareUrl()
+            }
+
+            ActionRow {
+              visible: sessions.shareUrl !== "" && root.currentTab === "local"
+              title: "Show phone QR"
+              subtitle: "Scan it with OpenCode Mobile"
+              onClicked: sessions.showPhoneQr()
+            }
+
+            Text {
               visible: !sessions.opencodeInstalled && root.currentTab === "local"
               width: parent.width
               textFormat: Text.PlainText
@@ -368,9 +393,20 @@ Panel {
 
                 ActionRow {
                   visible: modelData.online === true && modelData.reachable !== true
-                  title: "Pair with " + String(modelData.hostName || "unknown")
-                  subtitle: "Exposes this server, sends the credential"
+                  title: "Expose this machine"
+                  subtitle: "Pair server to its tailnet URL, notify " + String(modelData.hostName || "unknown")
                   onClicked: sessions.pairWith(String(modelData.hostName || ""))
+                }
+
+                Text {
+                  visible: modelData.reachable === true && String(modelData.url || "") !== ""
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  text: String(modelData.url || "")
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  elide: Text.ElideMiddle
                 }
 
                 ActionRow {

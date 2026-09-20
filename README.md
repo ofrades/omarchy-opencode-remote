@@ -8,6 +8,11 @@ with `opencode --server` over the tailnet.
 
 Remote control, not sync: a remote session's tools run on that machine.
 
+Passwords are opencode-managed and stable: the background service always
+has one (opencode regenerates it on start when missing), the plugin never
+changes it — it only shares it via Trust and the phone QR. WireGuard still
+decides who can reach the API at all.
+
 ## How it works
 
 - Each machine keeps its own opencode background service and session DB.
@@ -16,8 +21,7 @@ Remote control, not sync: a remote session's tools run on that machine.
   renders the merged picker.
 - Opening a remote session shells out to `opencode-remote-connect`, which
   resolves the peer via `tailscale status --json` and execs
-  `opencode --server http://<tailnet-ip>:<port> --session <id>` with the
-  shared password from the environment (never on a command line).
+  `opencode --server http://<tailnet-ip>:<port> [--session <id>]`.
 
 ## Requirements
 
@@ -27,21 +31,26 @@ Remote control, not sync: a remote session's tools run on that machine.
 
 ## Setup
 
-Two ways to connect machines. Pairing needs no manual server commands:
+Design: every opencode server is paired to its own tailnet URL —
+`https://<host>.<tailnet>.ts.net/` — via `tailscale serve`, no password.
+Phones and other machines just open that URL. Two ways to expose a
+machine; the widget needs no manual server commands:
 
-1. **Pair (recommended).** On machine A, open the widget → *Pair with B*
-   under B's section. That binds A's server to its tailnet address (reusing
-   the existing service password, or generating one on first use) and
-   Taildrops the credential to B. On machine B, an *Incoming pairing*
-   appears at the top — click **Trust**. B's sessions appear after the
-   next refresh. Repeat the other way round for bidirectional access.
-2. **Manual.** Set the same secret everywhere and put it in the widget
-   config (see below).
+1. **Expose (recommended).** Open the widget → *Expose this machine*
+   under any peer section. That binds the server to its tailnet address,
+   restarts it, and maps `https://<this-host>.<tailnet>.ts.net/` to it
+   with `tailscale serve`. The service password is left alone (opencode
+   enforces it, so it stays stable).
+   It also Taildrops the effective credential to that peer — on their side an
+   *Incoming pairing* appears at the top, click **Trust**, and your
+   sessions appear there after the next refresh.
+2. **Manual.** Same steps by hand:
 
 ```sh
-opencode service set hostname 0.0.0.0
-opencode service set password "<shared-secret>"
+opencode service set hostname <tailnet-ip>
+opencode service set port 49374
 opencode service start
+tailscale serve --bg --https=443 http://<tailnet-ip>:49374
 ```
 
 Widget config lives at `~/.config/omarchy-opencode-remote/config.json`
@@ -49,24 +58,13 @@ Widget config lives at `~/.config/omarchy-opencode-remote/config.json`
 
 ```json
 {
-  "password": "<optional shared secret>",
   "port": 49374
 }
 ```
 
-Pairing adds one entry per trusted machine automatically:
-
-```json
-{
-  "peers": {
-    "desktop": { "password": "<random secret>", "port": 49374 }
-  }
-}
-```
-
-`chmod 600` it — both launchers read it directly so secrets never appear
-in process lists. The local machine works without this file (the helper
-reads its own `service.json`); unpaired remotes report "not paired yet".
+Trusting a machine adds its entry automatically (`peers.<host>` with the
+effective service password and port). `chmod 600` it — launchers read it
+directly so secrets never appear in process lists.
 
 ## Install
 
@@ -94,13 +92,11 @@ pill to refresh.
 
 ## Security notes
 
-- The shared secret is basic-auth for full opencode API access on each
-  server machine: pick a long random one, keep the config `0600`, and only
-  ever bind `0.0.0.0` on machines whose LAN you trust (the tailnet path is
-  WireGuard-encrypted; the LAN path is not).
-- Binding only the Tailscale interface is possible too
-  (`opencode service set hostname <tailnet-ip>`), at the cost of redoing it
-  if the IP changes.
+- The service always has a password (opencode enforces it) and the plugin
+  never changes it — Expose only reads and shares it via Trust or the
+  phone QR, so it stays stable. Still, only expose machines on a tailnet
+  you control, and never bind `0.0.0.0` on a machine whose LAN you don't
+  trust (the tailnet path is WireGuard-encrypted; the LAN path is not).
 
 ## Tests
 

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.ofrades.opencode-remote",
   "name": "OpenCode Remote",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": "ofrades",
   "license": "MIT",
   "description": "Pick any opencode session from any tailnet machine in one bar picker.",

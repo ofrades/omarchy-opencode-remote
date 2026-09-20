@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0
+
+- Tailnet URLs are the design: expose maps each server to
+  `https://<host>.<tailnet>.ts.net/` via `tailscale serve`, and the
+  helper probes that URL first (raw tailnet IP as fallback). Passwords are
+  opencode-managed and stable — the plugin never generates or clears them,
+  only shares them via Trust and the phone QR (`opencode pair --url`).
+  Taildrop targets resolve via MagicDNS/IP, so HostNames with spaces work.
+  This-machine tab shows the shareable URL with Copy and Show-QR actions.
+
 ## 0.4.0
 
 - This-machine tab splits into **Running** (expanded) and

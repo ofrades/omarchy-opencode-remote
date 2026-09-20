@@ -7,7 +7,7 @@ function defaultStatus() {
     ok: true,
     opencode: { installed: false, version: "" },
     config: { path: "", exists: false, hasPassword: false, port: 49374 },
-    local: { reachable: false, url: "", error: "", sessions: [], history: [], total: 0 },
+    local: { reachable: false, url: "", serveUrl: "", error: "", sessions: [], history: [], total: 0 },
     tailscale: {
       installed: false, running: false, selfName: "", selfIps: [], peers: []
     },
@@ -73,6 +73,7 @@ function parseStatus(raw) {
     if (parsed.local && typeof parsed.local === "object") {
       base.local.reachable = parsed.local.reachable === true
       base.local.url = String(parsed.local.url || "")
+      base.local.serveUrl = String(parsed.local.serveUrl || "")
       base.local.error = String(parsed.local.error || "")
       base.local.total = parseInt(parsed.local.total, 10) || 0
       if (Array.isArray(parsed.local.sessions)) {
