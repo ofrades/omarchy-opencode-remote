@@ -87,7 +87,7 @@ BarWidget {
     text: root.displayText
     labelVisible: !root.vertical
     opacity: root.healthy ? 1.0 : 0.55
-    tooltipText: root.totalCount > 0 ? (root.totalCount + (root.totalCount === 1 ? " opencode session" : " opencode sessions") + " across " + root.hostCount + (root.hostCount === 1 ? " machine" : " machines")) : "OpenCode Remote"
+    tooltipText: root.hostCount > 0 ? (root.hostCount + (root.hostCount === 1 ? " published OpenCode server" : " published OpenCode servers")) : "OpenCode Remote"
 
     onPressed: function(b) {
       if (b === Qt.RightButton) root.refresh()

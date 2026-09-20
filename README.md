@@ -1,75 +1,36 @@
-# OpenCode Remote — Omarchy bar widget (opencode + Tailscale)
+# OpenCode Remote — Omarchy publisher
 
-One picker for every opencode session on every machine in your tailnet.
-The bar shows the total session count; the panel groups sessions by
-machine — this machine first, then each online Tailscale peer. Clicking a
-session opens it in a terminal: locally with `opencode --session`, remotely
-with `opencode --server` over the tailnet.
+Publish this machine's OpenCode server securely through Tailscale and open it
+from any device on your tailnet.
 
-Remote control, not sync: a remote session's tools run on that machine.
-
-Passwords are opencode-managed and stable: the background service always
-has one (opencode regenerates it on start when missing), the plugin never
-changes it — it only shares it via Trust and the phone QR. WireGuard still
-decides who can reach the API at all.
+Every machine publishes itself. The plugin discovers published OpenCode
+servers on online Tailscale peers, but never exchanges credentials or
+configures those peers.
 
 ## How it works
 
-- Each machine keeps its own opencode background service and session DB.
-- The widget's helper (`opencode_remote_status.py`) queries the local
-  service plus `GET /api/session` on every online peer, and the panel
-  renders the merged picker.
-- Opening a remote session shells out to `opencode-remote-connect`, which
-  resolves the peer via `tailscale status --json` and execs
-  `opencode --server http://<tailnet-ip>:<port> [--session <id>]`.
+- OpenCode keeps its own background service and password authentication.
+- **Publish this machine** binds that service to the machine's Tailscale IP,
+  starts it, and maps `https://<host>.<tailnet>.ts.net/` with
+  `tailscale serve`.
+- The panel shows local service health and active sessions. Clicking a session
+  opens its current OpenCode web route; the dashboard action opens the server
+  root.
+- The Remote view probes online peers' MagicDNS URLs and opens detected
+  OpenCode servers in the browser. Password-protected servers are shown as
+  **Login required**; remote session counts are unavailable without storing
+  their credentials.
+- Other devices open the tailnet URL and log in normally. OpenCode owns the
+  credential and login flow.
+
+`tailscale serve --bg` persists its publication configuration. Availability
+still depends on Tailscale and the OpenCode background service running.
 
 ## Requirements
 
-- `opencode` v2 on every machine (the background service owns sessions)
-- `tailscale` on PATH, logged in on every machine
-- Python 3 (for the status helper and the connect launcher)
-
-## Setup
-
-Design: every opencode server is paired to its own tailnet URL —
-`https://<host>.<tailnet>.ts.net/` — via `tailscale serve`. The endpoint
-retains opencode's password authentication; pairing transfers that existing
-credential to the selected tailnet peer.
-Phones and other machines just open that URL. Two ways to expose a
-machine; the widget needs no manual server commands:
-
-1. **Expose (recommended).** Open the widget → *Expose this machine*
-   under any peer section. That binds the server to its tailnet address,
-   restarts it, and maps `https://<this-host>.<tailnet>.ts.net/` to it
-   with `tailscale serve`. The service password is left alone (opencode
-   enforces it, so it stays stable).
-   It also Taildrops the effective credential to that peer — on their side an
-   *Incoming pairing* appears at the top. Verify the displayed host, tailnet
-   IP, and credential fingerprint, then click **Trust**. Trust only accepts a
-   private, current-user-owned regular file from `~/Downloads` whose claimed
-   host and IP match an online peer reported by Tailscale. Your
-   sessions appear there after the next refresh.
-2. **Manual.** Same steps by hand:
-
-```sh
-opencode service set hostname <tailnet-ip>
-opencode service set port 49374
-opencode service start
-tailscale serve --bg --https=443 http://<tailnet-ip>:49374
-```
-
-Widget config lives at `~/.config/omarchy-opencode-remote/config.json`
-(`0600`):
-
-```json
-{
-  "port": 49374
-}
-```
-
-Trusting a machine adds its entry automatically (`peers.<host>` with the
-effective service password and port). `chmod 600` it — launchers read it
-directly so secrets never appear in process lists.
+- OpenCode v2
+- Tailscale, connected with MagicDNS enabled
+- Python 3
 
 ## Install
 
@@ -77,31 +38,30 @@ directly so secrets never appear in process lists.
 omarchy plugin add https://github.com/ofrades/omarchy-opencode-remote.git --enable
 ```
 
-Then open the widget: your local sessions show immediately, and each peer
-lists its sessions or a short error (`offline`, `not paired yet`,
-`connection refused`, `auth failed`, …).
+Open the widget and choose **Publish this machine**. Once healthy, use:
 
-## Panel
+- **Open dashboard** to launch the web UI.
+- **Copy URL** to share the tailnet-only address.
+- **Show login QR** for OpenCode Mobile.
+- An active or historical session row to open that session in the browser.
 
-Two tabs, no setup screens:
+The optional port lives in
+`~/.config/omarchy-opencode-remote/config.json`:
 
-- **This machine** — running sessions, expanded. Past sessions sit in a
-  collapsed *History (N)* row underneath — expand it to continue one.
-  *New local session* opens a fresh TUI.
-- **Remote** — incoming pairings at the top with a **Trust** button each,
-  then one section per tailnet peer: its sessions, *New session on X*,
-  or a **Pair with X** row when it is not paired yet.
+```json
+{
+  "port": 49374
+}
+```
 
-Keys: `r` refresh · `1–2` switch tabs · `Esc` close. Right-click the bar
-pill to refresh.
+## Security
 
-## Security notes
-
-- The service always has a password (opencode enforces it) and the plugin
-  never changes it — Expose only reads and shares it via Trust or the
-  phone QR, so it stays stable. Still, only expose machines on a tailnet
-  you control, and never bind `0.0.0.0` on a machine whose LAN you don't
-  trust (the tailnet path is WireGuard-encrypted; the LAN path is not).
+- OpenCode password authentication remains enabled.
+- The plugin never copies or stores peer credentials.
+- Version 0.6 removes credentials left by the old pairing feature from its
+  config and recognized pairing files in `~/Downloads`.
+- Tailscale controls which devices can reach the published URL.
+- The service binds to the machine's Tailscale address, not `0.0.0.0`.
 
 ## Tests
 

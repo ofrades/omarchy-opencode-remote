@@ -1,18 +1,10 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import Quickshell
-import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 
-// OpenCode Remote popup: every session on every tailnet machine, in one
-// picker. The backend is Service.qml (local + remote opencode servers over
-// QML Process); this file is only layout and wiring.
-//
-// BarWidget.qml owns the bar slot and hands this panel the button to
-// anchor against.
 Panel {
   id: root
   moduleName: "io.github.ofrades.opencode-remote"
@@ -22,80 +14,35 @@ Panel {
   property var anchorItem: null
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
-
-  property string currentTab: "local"
-
   property bool showHistory: false
-
+  property string currentTab: "local"
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+  readonly property int totalCount: service.localSessions.length
+  readonly property int hostCount: (service.published ? 1 : 0) + service.peers.filter(function(peer) { return peer.detected === true }).length
+  readonly property bool healthy: service.configured
+  readonly property string heroMeta: service.configured
+    ? totalCount + (totalCount === 1 ? " active session" : " active sessions")
+    : "Publish this machine for remote access"
 
-  readonly property int totalCount: sessions.totalSessions
-  readonly property int hostCount: sessions.reachableHosts
-  readonly property bool healthy: sessions.configured
-  readonly property string heroMeta: !sessions.opencodeInstalled ? "opencode is not installed"
-    : totalCount === 0 ? "No sessions found"
-    : totalCount + (totalCount === 1 ? " session" : " sessions") + " · " + hostCount + (hostCount === 1 ? " machine" : " machines")
-
-  function open() {
-    refresh()
-    root.controller.show()
-  }
-
-  function close() {
-    root.controller.hide()
-  }
-
-  function toggle() {
-    if (root.opened) root.close()
-    else root.open()
-  }
-
+  function open() { refresh(); controller.show() }
+  function close() { controller.hide() }
+  function toggle() { if (opened) close(); else open() }
+  function refresh() { service.refresh() }
   function switchPanel(direction) {
-    if (root.bar && typeof root.bar.switchPanelFrom === "function")
-      return root.bar.switchPanelFrom(root.barIdentity, direction)
+    if (bar && typeof bar.switchPanelFrom === "function") return bar.switchPanelFrom(barIdentity, direction)
     return false
-  }
-
-  function refresh() {
-    sessions.refresh()
-  }
-
-  function showTab(name) {
-    currentTab = name
-  }
-
-  function openSession(peerName, sessionId) {
-    sessions.openSession(peerName, sessionId)
-    root.close()
-  }
-
-  function openLocal(sessionId) {
-    sessions.openLocalSession(sessionId)
-    root.close()
-  }
-
-  function openRemote(peerName, sessionId) {
-    sessions.openRemoteSession(peerName, sessionId)
-    root.close()
   }
 
   onOpenedChanged: if (opened) {
     if (panelFlick) panelFlick.contentY = 0
-    sessions.refresh()
+    refresh()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
-  Service {
-    id: sessions
-    settings: root.settings
-  }
-
-  // IPC is handled by BarWidget.qml (the bar-widget entry point), which
-  // forwards open/close/toggle here. A second IpcHandler on the same
-  // target would only conflict, so this panel exposes none.
+  Service { id: service; settings: root.settings }
 
   KeyboardPanel {
     id: panel
@@ -112,10 +59,10 @@ Panel {
       anchors.fill: parent
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
-      onTextKey: function(t) {
-        if (t === "r" || t === "R") sessions.refresh()
-        else if (t === "1") root.showTab("local")
-        else if (t === "2") root.showTab("remote")
+      onTextKey: function(text) {
+        if (text === "r" || text === "R") service.refresh()
+        else if (text === "1") root.currentTab = "local"
+        else if (text === "2") root.currentTab = "remote"
       }
 
       Flickable {
@@ -126,7 +73,6 @@ Panel {
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
-        interactive: contentHeight > height
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
         Column {
@@ -136,220 +82,126 @@ Panel {
 
           PanelHero {
             width: parent.width
-            title: "OpenCode"
+            title: "OpenCode Remote"
             meta: root.heroMeta
             foreground: root.foreground
             fontFamily: root.fontFamily
             iconOpacity: root.healthy ? 1.0 : 0.5
             iconComponent: Component {
-              Text {
-                textFormat: Text.PlainText
-                text: "󰆍"
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.display
-              }
+              Text { textFormat: Text.PlainText; text: "󰆍"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.display }
             }
           }
 
-          // ---- One picker across all machines.
-          Column {
+          RowLayout {
             width: parent.width
-            spacing: Style.space(10)
-
-            // View switcher as bordered pills, same as the wifi panel's
-            // band/DNS pills: `active` fills the current view.
-            RowLayout {
-              width: parent.width
-              spacing: Style.space(8)
-
-              Button {
-                text: "This machine"
-                fontSize: Style.font.bodySmall
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                bordered: true
-                active: root.currentTab === "local"
-                Layout.fillWidth: true
-                Layout.preferredWidth: 100
-                onClicked: root.showTab("local")
-              }
-
-              Button {
-                text: "Remote"
-                fontSize: Style.font.bodySmall
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                bordered: true
-                active: root.currentTab === "remote"
-                Layout.fillWidth: true
-                Layout.preferredWidth: 100
-                onClicked: root.showTab("remote")
-              }
+            spacing: Style.space(8)
+            Button {
+              text: "This machine"; fontSize: Style.font.bodySmall; foreground: root.foreground; fontFamily: root.fontFamily
+              bordered: true; active: root.currentTab === "local"; Layout.fillWidth: true
+              onClicked: root.currentTab = "local"
             }
-
-            // Incoming pairings first: trusting one is what makes new
-            // sessions appear below.
-            Column {
-              visible: sessions.pairingInbox.length > 0 && root.currentTab === "remote"
-              width: parent.width
-              spacing: Style.space(6)
-
-              PanelSectionHeader {
-                text: "INCOMING PAIRINGS"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-              }
-
-              Text {
-                width: parent.width
-                textFormat: Text.PlainText
-                text: "Only trust machines you recognize — this grants them full opencode API access."
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
-              }
-
-              Repeater {
-                model: sessions.pairingInbox
-                ActionRow {
-                  required property var modelData
-                  title: "Trust " + String(modelData.host || "unknown")
-                  subtitle: String(modelData.tailIP || "") + ":" + modelData.port + " · " + String(modelData.fingerprint || "")
-                  onClicked: sessions.trustPairing(String(modelData.file || ""), String(modelData.host || ""))
-                }
-              }
+            Button {
+              text: "Remote"; fontSize: Style.font.bodySmall; foreground: root.foreground; fontFamily: root.fontFamily
+              bordered: true; active: root.currentTab === "remote"; Layout.fillWidth: true
+              onClicked: root.currentTab = "remote"
             }
+          }
+
+          Column {
+            visible: root.currentTab === "local"
+            width: parent.width
+            spacing: Style.space(6)
+
+            PanelSectionHeader { text: "THIS MACHINE"; foreground: root.foreground; fontFamily: root.fontFamily }
+
+            StatusRow { label: "OpenCode"; value: service.localReachable ? "Running" : (service.opencodeInstalled ? "Stopped" : "Not installed"); good: service.localReachable }
+            StatusRow { label: "Tailscale"; value: service.tailscaleRunning ? "Connected" : (service.tailscaleInstalled ? "Offline" : "Not installed"); good: service.tailscaleRunning }
+            StatusRow { label: "Published"; value: service.published ? "Available" : "Not configured"; good: service.published }
 
             Text {
-              textFormat: Text.PlainText
-              visible: sessions.actionStatus !== "" || sessions.lastError !== ""
+              visible: service.actionStatus !== "" || service.lastError !== ""
               width: parent.width
-              text: sessions.actionStatus !== "" ? sessions.actionStatus : sessions.lastError
-              color: sessions.lastError !== "" && sessions.actionStatus === "" ? root.urgent : root.dim
+              textFormat: Text.PlainText
+              text: service.lastError !== "" ? service.lastError : service.actionStatus
+              color: service.lastError !== "" ? root.urgent : root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
             }
 
             ActionRow {
-              visible: sessions.localReachable && root.currentTab === "local"
-              title: "New local session"
-              subtitle: "Open a fresh TUI on this machine"
-              onClicked: root.openLocal("")
+              visible: !service.configured
+              title: "Publish this machine"
+              subtitle: "Start OpenCode and serve it securely through Tailscale"
+              onClicked: service.publish()
             }
 
             Text {
-              visible: sessions.shareUrl !== "" && root.currentTab === "local"
+              visible: service.published
               width: parent.width
               textFormat: Text.PlainText
-              text: sessions.shareUrl
+              text: service.publicUrl
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               elide: Text.ElideMiddle
             }
 
-            ActionRow {
-              visible: sessions.shareUrl !== "" && root.currentTab === "local"
-              title: "Copy server URL"
-              subtitle: "Paste it into the phone app"
-              onClicked: sessions.copyShareUrl()
-            }
+            ActionRow { visible: service.published; title: "Open dashboard"; subtitle: "Open the published OpenCode UI"; onClicked: { service.openDashboard(); root.close() } }
+            ActionRow { visible: service.published; title: "Copy URL"; subtitle: "Share the tailnet-only address"; onClicked: service.copyUrl() }
+            ActionRow { visible: service.published; title: "Show login QR"; subtitle: "Connect OpenCode Mobile"; onClicked: service.showQr() }
+          }
 
-            ActionRow {
-              visible: sessions.shareUrl !== "" && root.currentTab === "local"
-              title: "Show phone QR"
-              subtitle: "Scan it with OpenCode Mobile"
-              onClicked: sessions.showPhoneQr()
-            }
+          Column {
+            visible: root.currentTab === "local" && service.localReachable
+            width: parent.width
+            spacing: Style.space(6)
+
+            PanelSectionHeader { text: "ACTIVE SESSIONS"; foreground: root.foreground; fontFamily: root.fontFamily }
 
             Text {
-              visible: !sessions.opencodeInstalled && root.currentTab === "local"
+              visible: service.localSessions.length === 0
               width: parent.width
               textFormat: Text.PlainText
-              text: "Install opencode v2 to begin."
+              text: "No active sessions."
               color: root.dim
               font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              wrapMode: Text.WordWrap
+              font.pixelSize: Style.font.body
+              horizontalAlignment: Text.AlignHCenter
             }
 
-            // This machine first: open sessions only, no history trawl.
+            Repeater {
+              model: service.localSessions
+              SessionRow { required property var modelData; session: modelData }
+            }
+
+            ActionRow {
+              visible: service.localHistory.length > 0
+              title: (root.showHistory ? "▾ " : "▸ ") + "History (" + service.localHistory.length + ")"
+              subtitle: root.showHistory ? "Hide past sessions" : "Show past sessions"
+              onClicked: root.showHistory = !root.showHistory
+            }
+
             Column {
-              visible: sessions.opencodeInstalled && root.currentTab === "local"
+              visible: root.showHistory
               width: parent.width
               spacing: Style.space(6)
-
-              PanelSectionHeader {
-                text: "RUNNING"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-              }
-
-              Text {
-                visible: !sessions.localReachable
-                width: parent.width
-                textFormat: Text.PlainText
-                text: sessions.localError !== "" ? ("Local server: " + sessions.localError) : "Local server not reachable"
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                wrapMode: Text.WordWrap
-              }
-
-              Text {
-                visible: sessions.localReachable && sessions.localSessions.length === 0
-                width: parent.width
-                textFormat: Text.PlainText
-                text: sessions.localTotal > 0 ? ("No running sessions — " + sessions.localTotal + " stopped.") : "No sessions here yet."
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-                horizontalAlignment: Text.AlignHCenter
-              }
-
-              Repeater {
-                model: sessions.localSessions
-                SessionRow {
-                  required property var modelData
-                  width: parent.width
-                  peerName: ""
-                  session: modelData
-                }
-              }
-
-              ActionRow {
-                visible: sessions.localReachable && sessions.localHistory.length > 0
-                title: (root.showHistory ? "▾ " : "▸ ") + "Stopped (" + sessions.localHistory.length + ")"
-                subtitle: root.showHistory ? "Hide stopped sessions" : "Continue a stopped session"
-                onClicked: root.showHistory = !root.showHistory
-              }
-
-              Column {
-                visible: root.showHistory && sessions.localHistory.length > 0
-                width: parent.width
-                spacing: Style.space(6)
-
-                Repeater {
-                  model: sessions.localHistory
-                  SessionRow {
-                    required property var modelData
-                    width: parent.width
-                    peerName: ""
-                    session: modelData
-                  }
-                }
-              }
+              Repeater { model: service.localHistory; SessionRow { required property var modelData; session: modelData } }
             }
+          }
 
-            // Then one group per tailnet peer.
+          Column {
+            visible: root.currentTab === "remote"
+            width: parent.width
+            spacing: Style.space(6)
+
+            PanelSectionHeader { text: "PUBLISHED SERVERS"; foreground: root.foreground; fontFamily: root.fontFamily }
+
             Text {
-              visible: root.currentTab === "remote" && !sessions.tailscaleRunning
+              visible: !service.tailscaleRunning
               width: parent.width
               textFormat: Text.PlainText
-              text: sessions.tailscaleInstalled ? "Tailscale is offline — connect, then reopen." : "Install Tailscale to reach your other machines."
+              text: "Connect Tailscale to discover other published machines."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -357,97 +209,35 @@ Panel {
             }
 
             Repeater {
-              model: sessions.peers
-              Column {
+              model: service.peers.filter(function(peer) { return peer.detected === true })
+              ActionRow {
                 required property var modelData
-                visible: root.currentTab === "remote"
-                width: parent.width
-                spacing: Style.space(6)
-
-                PanelSectionHeader {
-                  text: String(modelData.hostName || "unknown").toUpperCase()
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                }
-
-                Text {
-                  visible: modelData.online !== true
-                  width: parent.width
-                  textFormat: Text.PlainText
-                  text: "Offline"
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                }
-
-                Text {
-                  visible: modelData.online === true && modelData.reachable !== true
-                  width: parent.width
-                  textFormat: Text.PlainText
-                  text: Model.peerLabel(modelData) + (modelData.error !== "" ? (" — " + modelData.error) : "")
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  wrapMode: Text.WordWrap
-                }
-
-                ActionRow {
-                  visible: modelData.online === true && modelData.reachable !== true
-                  title: "Expose this machine"
-                  subtitle: "Pair server to its tailnet URL, notify " + String(modelData.hostName || "unknown")
-                  onClicked: sessions.pairWith(String(modelData.hostName || ""))
-                }
-
-                Text {
-                  visible: modelData.reachable === true && String(modelData.url || "") !== ""
-                  width: parent.width
-                  textFormat: Text.PlainText
-                  text: String(modelData.url || "")
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  elide: Text.ElideMiddle
-                }
-
-                ActionRow {
-                  visible: modelData.reachable === true
-                  title: "New session on " + String(modelData.hostName || "")
-                  subtitle: "Tools run on that machine"
-                  onClicked: root.openRemote(String(modelData.hostName || ""), "")
-                }
-
-                Repeater {
-                  model: modelData.sessions
-                  SessionRow {
-                    required property var modelData
-                    width: parent.width
-                    peerName: String(parent.modelData.hostName || "")
-                    session: modelData
-                  }
-                }
-
-                Text {
-                  visible: modelData.online === true && modelData.reachable === true && modelData.sessions.length === 0
-                  width: parent.width
-                  textFormat: Text.PlainText
-                  text: "No sessions on this machine."
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  horizontalAlignment: Text.AlignHCenter
-                }
+                title: String(modelData.hostName || "OpenCode server")
+                subtitle: modelData.loginRequired === true ? "Login required · " + String(modelData.url || "") : String(modelData.url || "")
+                onClicked: { service.openPeer(modelData); root.close() }
               }
             }
 
             Text {
-              visible: root.currentTab === "remote" && sessions.tailscaleRunning && sessions.peers.length === 0
+              visible: service.tailscaleRunning && service.peers.filter(function(peer) { return peer.detected === true }).length === 0
               width: parent.width
               textFormat: Text.PlainText
-              text: "No tailnet peers found."
+              text: "No other published OpenCode servers detected."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
               horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WordWrap
+            }
+
+            Text {
+              visible: service.peers.filter(function(peer) { return peer.online === true && peer.detected !== true }).length > 0
+              width: parent.width
+              textFormat: Text.PlainText
+              text: service.peers.filter(function(peer) { return peer.online === true && peer.detected !== true }).length + " online tailnet machine(s) are not publishing OpenCode."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
           }
@@ -469,185 +259,51 @@ Panel {
   component ActionRow: CursorSurface {
     id: actionRow
     signal clicked()
-
     property string title: ""
     property string subtitle: ""
-
-    // A full-width action row is the whole contract of this component. It has
-    // to claim the width itself: the root is a Rectangle (via CursorSurface),
-    // which has no implicit width, and a Column does not stretch its children
-    // — so without this every ActionRow renders 0px wide inside the panel's
-    // Columns and shows up as a blank gap.
     width: parent ? parent.width : 0
-
     foreground: root.foreground
     implicitHeight: actionContent.implicitHeight + Style.spacing.rowPaddingX
-
-    MouseArea {
-      anchors.fill: parent
-      hoverEnabled: true
-      cursorShape: enabled && !sessions.busy ? Qt.PointingHandCursor : Qt.ArrowCursor
-      enabled: !sessions.busy
-      onClicked: actionRow.clicked()
-    }
-
+    MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; enabled: !service.busy; onClicked: actionRow.clicked() }
     RowLayout {
       id: actionContent
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(10)
-      anchors.rightMargin: Style.space(10)
-      spacing: Style.space(8)
-
+      anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10); anchors.rightMargin: Style.space(10); spacing: Style.space(8)
       ColumnLayout {
-        Layout.fillWidth: true
-        spacing: Style.space(1)
-
-        Text {
-          textFormat: Text.PlainText
-          Layout.fillWidth: true
-          text: actionRow.title
-          color: root.foreground
-          opacity: sessions.busy ? 0.5 : 1.0
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          elide: Text.ElideRight
-        }
-
-        Text {
-          visible: actionRow.subtitle !== ""
-          textFormat: Text.PlainText
-          Layout.fillWidth: true
-          text: actionRow.subtitle
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideMiddle
-        }
+        Layout.fillWidth: true; spacing: Style.space(1)
+        Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: actionRow.title; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; elide: Text.ElideRight }
+        Text { visible: actionRow.subtitle !== ""; textFormat: Text.PlainText; Layout.fillWidth: true; text: actionRow.subtitle; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption; elide: Text.ElideMiddle }
       }
-
-      Text {
-        textFormat: Text.PlainText
-        text: "›"
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.body
-        Layout.alignment: Qt.AlignVCenter
-      }
+      Text { textFormat: Text.PlainText; text: "›"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.body }
     }
+  }
+
+  component StatusRow: RowLayout {
+    property string label: ""
+    property string value: ""
+    property bool good: false
+    width: parent ? parent.width : 0
+    Text { textFormat: Text.PlainText; text: parent.label; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; Layout.fillWidth: true }
+    Text { textFormat: Text.PlainText; text: parent.value; color: parent.good ? root.foreground : root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
   }
 
   component SessionRow: CursorSurface {
     id: sessionRow
-    property string peerName: ""
-    property var session: null
-    readonly property string sessionId: session ? String(session.id || "") : ""
-    readonly property bool isSelected: sessions.selectedSession !== ""
-      && sessions.selectedSession === sessionId
-      && sessions.selectedPeer === peerName
-
+    required property var session
+    width: parent ? parent.width : 0
     foreground: root.foreground
     implicitHeight: sessionContent.implicitHeight + Style.spacing.rowPaddingX
-
-    MouseArea {
-      anchors.fill: parent
-      hoverEnabled: true
-      cursorShape: Qt.PointingHandCursor
-      onClicked: root.openSession(sessionRow.peerName, sessionRow.sessionId)
-    }
-
+    MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { service.openSession(sessionRow.session); root.close() } }
     RowLayout {
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(10)
-      anchors.rightMargin: Style.space(6)
-      spacing: Style.space(8)
-
-      Text {
-        visible: sessionRow.isSelected
-        textFormat: Text.PlainText
-        text: "●"
-        color: root.foreground
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.bodySmall
-        Layout.alignment: Qt.AlignVCenter
-      }
-
+      anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10); anchors.rightMargin: Style.space(6); spacing: Style.space(8)
       ColumnLayout {
         id: sessionContent
-        Layout.fillWidth: true
-        spacing: Style.space(1)
-
-        Text {
-          textFormat: Text.PlainText
-          Layout.fillWidth: true
-          text: sessionRow.session ? String(sessionRow.session.title || "Untitled session") : "Untitled session"
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          elide: Text.ElideRight
-        }
-
-        Text {
-          textFormat: Text.PlainText
-          Layout.fillWidth: true
-          text: sessionRow.session ? Model.sessionSubtitle(sessionRow.session) : ""
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideMiddle
-        }
+        Layout.fillWidth: true; spacing: Style.space(1)
+        Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: String(sessionRow.session.title || "Untitled session"); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; elide: Text.ElideRight }
+        Text { textFormat: Text.PlainText; Layout.fillWidth: true; text: Model.sessionSubtitle(sessionRow.session); color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption; elide: Text.ElideMiddle }
       }
-
-      Text {
-        visible: sessionRow.peerName === ""
-        textFormat: Text.PlainText
-        text: "›"
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.body
-        Layout.alignment: Qt.AlignVCenter
-      }
-
-      Text {
-        visible: sessionRow.peerName !== ""
-        textFormat: Text.PlainText
-        text: "⇄"
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.body
-        Layout.alignment: Qt.AlignVCenter
-      }
+      Text { textFormat: Text.PlainText; text: "↗"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.body }
     }
-  }
-
-  component InfoPair: Row {
-    property string label: ""
-    property string value: ""
-
-    width: parent.width
-    spacing: Style.space(8)
-
-    InfoLabel { text: label }
-    Item { width: Math.max(0, parent.width - parent.children[0].implicitWidth - parent.children[2].implicitWidth - parent.spacing * 2); height: 1 }
-    InfoValue { text: value }
-  }
-
-  component InfoLabel: Text {
-    textFormat: Text.PlainText
-    color: root.foreground
-    opacity: 0.6
-    font.family: root.fontFamily
-    font.pixelSize: Style.font.bodySmall
-  }
-
-  component InfoValue: Text {
-    textFormat: Text.PlainText
-    color: root.foreground
-    font.family: root.fontFamily
-    font.pixelSize: Style.font.bodySmall
-    elide: Text.ElideMiddle
   }
 }

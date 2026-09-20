@@ -1,108 +1,82 @@
 #!/usr/bin/env python3
-"""Single-shot status helper for the omarchy-opencode-remote bar widget.
-
-Queries the local opencode background service plus every online Tailscale
-peer exposing an opencode server, then prints one JSON document for QML.
-
-Each server machine exposes its password-authenticated service inside the
-tailnet. Pairing copies the existing opencode-managed credential into the
-per-peer entries in ~/.config/omarchy-opencode-remote/config.json. The local
-machine is queried through its own service.json.
-
-Never fails hard: every probe has a timeout and any failure is reported
-inside the payload so the panel can show it instead of going blank.
-"""
+"""Report local OpenCode publication and session status for the bar widget."""
 
 import base64
 import glob
-import hashlib
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-CONFIG_DIR_NAME = "omarchy-opencode-remote"
-CONFIG_FILE_NAME = "config.json"
-PAIR_APP_TAG = "omarchy-opencode-remote-pair"
-PAIR_GLOB = "opencode-pair-*.json"
-DEFAULT_PORT = 49374
 DEFAULT_TIMEOUT_SEC = 3
-MAX_SESSIONS_PER_HOST = 100
+MAX_SESSIONS = 100
+DEFAULT_PORT = 49374
 
 
 def config_home():
-    override = os.environ.get("XDG_CONFIG_HOME", "").strip()
-    if override:
-        return override
-    return os.path.join(os.path.expanduser("~"), ".config")
+    return os.environ.get("XDG_CONFIG_HOME", "").strip() or os.path.join(
+        os.path.expanduser("~"), ".config"
+    )
 
 
-def load_config():
-    path = os.path.join(config_home(), CONFIG_DIR_NAME, CONFIG_FILE_NAME)
-    config = {"password": "", "port": DEFAULT_PORT, "timeoutSec": DEFAULT_TIMEOUT_SEC,
-              "peers": {}}
-    exists = os.path.isfile(path)
-    if exists:
+def migrate_legacy_config():
+    """Preserve the port while deleting credentials left by pre-0.6 pairing."""
+    directory = os.path.join(config_home(), "omarchy-opencode-remote")
+    path = os.path.join(directory, "config.json")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError):
+        return
+    if not isinstance(raw, dict) or not ({"password", "peers", "timeoutSec"} & set(raw)):
+        return
+    try:
+        port = int(raw.get("port", DEFAULT_PORT))
+    except (TypeError, ValueError):
+        port = DEFAULT_PORT
+    if not 1 <= port <= 65535:
+        port = DEFAULT_PORT
+    os.makedirs(directory, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(dir=directory, prefix=".tmp-config-")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump({"port": port}, handle, indent=2)
+            handle.write("\n")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
         try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+
+
+def remove_legacy_pairing_files():
+    """Delete only credential files created by the removed pairing feature."""
+    pattern = os.path.join(os.path.expanduser("~"), "Downloads", "opencode-pair-*.json")
+    for path in glob.glob(pattern):
+        try:
+            info = os.lstat(path)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                continue
             with open(path, "r", encoding="utf-8") as handle:
                 raw = json.load(handle)
+            if not isinstance(raw, dict) or raw.get("app") != "omarchy-opencode-remote-pair":
+                continue
+            os.unlink(path)
         except (OSError, ValueError):
-            raw = None
-        if isinstance(raw, dict):
-            if isinstance(raw.get("password"), str):
-                config["password"] = raw["password"]
-            try:
-                port = int(raw.get("port", DEFAULT_PORT))
-            except (TypeError, ValueError):
-                port = DEFAULT_PORT
-            if 1 <= port <= 65535:
-                config["port"] = port
-            try:
-                timeout = int(raw.get("timeoutSec", DEFAULT_TIMEOUT_SEC))
-            except (TypeError, ValueError):
-                timeout = DEFAULT_TIMEOUT_SEC
-            config["timeoutSec"] = max(1, min(15, timeout))
-            peers = raw.get("peers", {}) or {}
-            if isinstance(peers, dict):
-                for name, entry in peers.items():
-                    if not isinstance(entry, dict):
-                        continue
-                    password = entry.get("password", "")
-                    if not isinstance(password, str):
-                        continue
-                    try:
-                        peer_port = int(entry.get("port", config["port"]))
-                    except (TypeError, ValueError):
-                        peer_port = config["port"]
-                    if not 1 <= peer_port <= 65535:
-                        peer_port = config["port"]
-                    config["peers"][str(name)] = {"password": password, "port": peer_port}
-    return path, exists, config
+            continue
 
 
-def peer_credentials(config, host_name):
-    """Per-peer credential, else the shared global one. Empty means no auth."""
-    entry = config["peers"].get(host_name, {})
-    if isinstance(entry, dict) and "password" in entry:
-        password = entry.get("password", "")
-        if not isinstance(password, str):
-            password = ""
-        try:
-            port = int(entry.get("port", config["port"]))
-        except (TypeError, ValueError):
-            port = config["port"]
-        if not 1 <= port <= 65535:
-            port = config["port"]
-        return password, port
-    return config["password"], config["port"]
-
-
-def command_output(command, timeout):
+def command_output(command, timeout=8):
     try:
         completed = subprocess.run(
             command, check=False, capture_output=True, text=True, timeout=timeout
@@ -113,56 +87,37 @@ def command_output(command, timeout):
 
 
 def service_status_url(opencode_bin):
-    """Parse `opencode service status` for the local server URL."""
-    exit_code, out = command_output([opencode_bin, "service", "status"], 8)
-    if exit_code != 0 or not out:
+    code, out = command_output([opencode_bin, "service", "status"])
+    if code != 0:
         return ""
     match = re.search(r"https?://[^\s/]+(?::\d+)?", out)
     return match.group(0) if match else ""
 
 
-def local_password():
+def service_password():
     path = os.path.join(config_home(), "opencode", "service.json")
     try:
         with open(path, "r", encoding="utf-8") as handle:
             raw = json.load(handle)
     except (OSError, ValueError):
         return ""
-    if isinstance(raw, dict) and isinstance(raw.get("password"), str):
-        return raw["password"]
-    return ""
+    return raw.get("password", "") if isinstance(raw, dict) and isinstance(raw.get("password"), str) else ""
 
 
-def fetch_json(url, password, timeout):
-    """GET url, return (True, parsed) or (False, short error string)."""
+def fetch_json(url, password):
     request = urllib.request.Request(url, method="GET")
     if password:
-        token = base64.b64encode(("opencode:" + password).encode("utf-8")).decode("ascii")
+        token = base64.b64encode(("opencode:" + password).encode()).decode("ascii")
         request.add_header("Authorization", "Basic " + token)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as exc:
-        if exc.code == 401:
-            return False, "auth failed"
-        return False, "http %d" % exc.code
-    except urllib.error.URLError as exc:
-        reason = exc.reason
-        name = type(reason).__name__ if reason is not None else ""
-        text = str(reason) if reason is not None else ""
-        if "Connection refused" in text or "Connect call failed" in text:
-            return False, "connection refused"
-        if "Timeout" in name or "timed out" in text:
-            return False, "unreachable"
-        if "No route to host" in text or "Name or service not known" in text:
-            return False, "unreachable"
+        with urllib.request.urlopen(request, timeout=DEFAULT_TIMEOUT_SEC) as response:
+            return True, json.loads(response.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as error:
+        return False, "auth failed" if error.code == 401 else "http %d" % error.code
+    except (urllib.error.URLError, TimeoutError, OSError):
         return False, "unreachable"
-    except (TimeoutError, OSError):
-        return False, "unreachable"
-    try:
-        return True, json.loads(body)
     except ValueError:
-        return False, "not an opencode server"
+        return False, "not an OpenCode server"
 
 
 def epoch_ms_to_iso(value):
@@ -170,266 +125,166 @@ def epoch_ms_to_iso(value):
         stamp = float(value) / 1000.0
     except (TypeError, ValueError):
         return ""
-    if stamp <= 0:
+    return datetime.fromtimestamp(stamp, tz=timezone.utc).isoformat() if stamp > 0 else ""
+
+
+def web_session_url(public_url, session_id):
+    if not public_url:
         return ""
-    return datetime.fromtimestamp(stamp, tz=timezone.utc).isoformat()
+    server = public_url.rstrip("/")
+    encoded = base64.urlsafe_b64encode(server.encode()).decode().rstrip("=")
+    return "%s/server/%s/session/%s" % (server, encoded, session_id)
 
 
-def normalize_session(entry):
-    if not isinstance(entry, dict):
-        return None
-    session_id = entry.get("id", "")
-    if not session_id:
+def normalize_session(entry, public_url):
+    if not isinstance(entry, dict) or not entry.get("id"):
         return None
     location = entry.get("location", {}) or {}
     model = entry.get("model", {}) or {}
-    provider = str(model.get("providerID", "") or "")
-    model_id = str(model.get("id", "") or "")
     times = entry.get("time", {}) or {}
-    updated = times.get("updated") or times.get("created")
+    session_id = str(entry["id"])
     return {
-        "id": str(session_id),
+        "id": session_id,
         "title": str(entry.get("title", "") or "Untitled session"),
         "directory": str(location.get("directory", "") or ""),
         "agent": str(entry.get("agent", "") or ""),
-        "model": (provider + "/" + model_id).strip("/"),
-        "updatedAt": epoch_ms_to_iso(updated),
+        "model": (str(model.get("providerID", "") or "") + "/" + str(model.get("id", "") or "")).strip("/"),
+        "updatedAt": epoch_ms_to_iso(times.get("updated") or times.get("created")),
+        "webUrl": web_session_url(public_url, session_id),
     }
 
 
-def list_sessions(base_url, password, timeout, only_active=False):
-    ok, data = fetch_json(base_url.rstrip("/") + "/api/session", password, timeout)
+def list_sessions(base_url, password, public_url):
+    ok, data = fetch_json(base_url.rstrip("/") + "/api/session", password)
     if not ok:
         return False, data, [], [], 0
     items = data.get("data", []) if isinstance(data, dict) else []
-    if not isinstance(items, list):
-        items = []
-    total = len(items)
-    active_ids = None
-    if only_active:
-        active_ok, active_data = fetch_json(
-            base_url.rstrip("/") + "/api/session/active", password, timeout
-        )
-        if not active_ok:
-            return False, active_data, [], [], total
-        active_ids = set()
-        if isinstance(active_data, dict):
-            active_map = active_data.get("data", {}) or {}
-            if isinstance(active_map, dict):
-                active_ids = set(active_map.keys())
-    open_sessions = []
-    history = []
-    for entry in items:
-        normalized = normalize_session(entry)
-        if normalized is None:
-            continue
-        if active_ids is not None and normalized["id"] not in active_ids:
-            history.append(normalized)
-        else:
-            open_sessions.append(normalized)
-    by_updated = lambda item: item["updatedAt"]
-    open_sessions.sort(key=by_updated, reverse=True)
-    history.sort(key=by_updated, reverse=True)
-    return True, "", open_sessions[:MAX_SESSIONS_PER_HOST], history[:MAX_SESSIONS_PER_HOST], total
+    items = items if isinstance(items, list) else []
+    active_ok, active_data = fetch_json(base_url.rstrip("/") + "/api/session/active", password)
+    if not active_ok:
+        return False, active_data, [], [], len(items)
+    active_map = active_data.get("data", {}) if active_ok and isinstance(active_data, dict) else {}
+    active_ids = set(active_map.keys()) if isinstance(active_map, dict) else set()
+    browser_url = public_url or base_url
+    sessions = [normalize_session(item, browser_url) for item in items]
+    sessions = [item for item in sessions if item is not None]
+    sessions.sort(key=lambda item: item["updatedAt"], reverse=True)
+    active = [item for item in sessions if item["id"] in active_ids]
+    history = [item for item in sessions if item["id"] not in active_ids]
+    return True, "", active[:MAX_SESSIONS], history[:MAX_SESSIONS], len(items)
 
 
 def tailscale_status(tailscale_bin):
-    result = {"installed": tailscale_bin is not None, "running": False,
-              "selfName": "", "selfDns": "", "selfIps": [], "rawPeers": []}
+    result = {"installed": bool(tailscale_bin), "running": False, "selfName": "", "selfDns": "", "selfIps": [], "peers": []}
     if not tailscale_bin:
         return result
-    exit_code, out = command_output([tailscale_bin, "status", "--json"], 8)
-    if exit_code != 0 or not out:
+    code, out = command_output([tailscale_bin, "status", "--json"])
+    if code != 0 or not out:
         return result
     try:
         status = json.loads(out)
     except ValueError:
         return result
-    result["running"] = status.get("BackendState") == "Running"
-    yourself = status.get("Self", {}) or {}
-    result["selfName"] = str(yourself.get("HostName", "") or "")
-    result["selfDns"] = str(yourself.get("DNSName", "") or "").rstrip(".")
-    ips = yourself.get("TailscaleIPs", []) or []
-    result["selfIps"] = [str(ip) for ip in ips]
-    peers = status.get("Peer", {}) or {}
-    for peer in peers.values():
+    own = status.get("Self", {}) or {}
+    result.update({
+        "running": status.get("BackendState") == "Running",
+        "selfName": str(own.get("HostName", "") or ""),
+        "selfDns": str(own.get("DNSName", "") or "").rstrip("."),
+        "selfIps": [str(value) for value in (own.get("TailscaleIPs", []) or [])],
+    })
+    for peer in (status.get("Peer", {}) or {}).values():
         if not isinstance(peer, dict):
             continue
-        peer_ips = peer.get("TailscaleIPs", []) or []
-        result["rawPeers"].append(
-            {
-                "hostName": str(peer.get("HostName", "") or "unknown"),
-                "dnsName": str(peer.get("DNSName", "") or ""),
-                "os": str(peer.get("OS", "") or ""),
-                "online": peer.get("Online") is True,
-                "ips": [str(ip) for ip in peer_ips],
-            }
-        )
-    result["rawPeers"].sort(
-        key=lambda peer: (not peer["online"], peer["hostName"].lower())
-    )
+        result["peers"].append({
+            "hostName": str(peer.get("HostName", "") or "unknown"),
+            "dnsName": str(peer.get("DNSName", "") or "").rstrip("."),
+            "online": peer.get("Online") is True,
+        })
     return result
 
 
-def downloads_dir():
-    return os.path.join(os.path.expanduser("~"), "Downloads")
+def probe_peer(peer):
+    result = dict(peer)
+    result.update({"detected": False, "url": "", "loginRequired": False, "error": ""})
+    if not peer["online"]:
+        result["error"] = "offline"
+        return result
+    if not peer["dnsName"]:
+        result["error"] = "no MagicDNS name"
+        return result
+    base_url = "https://%s" % peer["dnsName"]
+    request = urllib.request.Request(base_url + "/api/info", method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=DEFAULT_TIMEOUT_SEC) as response:
+            body = json.loads(response.read().decode("utf-8", "replace"))
+            if response.status == 200 and isinstance(body, dict):
+                result.update({"detected": True, "url": base_url + "/"})
+            else:
+                result["error"] = "not OpenCode"
+    except urllib.error.HTTPError as error:
+        realm = str(error.headers.get("WWW-Authenticate", ""))
+        if error.code == 401 and 'Basic realm="Secure Area"' in realm:
+            result.update({"detected": True, "url": base_url + "/", "loginRequired": True})
+        else:
+            result["error"] = "http %d" % error.code
+    except (urllib.error.URLError, TimeoutError, OSError):
+        result["error"] = "not published"
+    except ValueError:
+        result["error"] = "not OpenCode"
+    return result
 
 
-def pairing_inbox():
-    """Metadata for incoming pairing files. Passwords never leave this process."""
-    inbox = []
-    pattern = os.path.join(downloads_dir(), PAIR_GLOB)
-    for path in sorted(glob.glob(pattern)):
-        try:
-            with open(path, "r", encoding="utf-8") as handle:
-                raw = json.load(handle)
-        except (OSError, ValueError):
-            continue
-        if not isinstance(raw, dict) or raw.get("app") != PAIR_APP_TAG:
-            continue
-        host = raw.get("host", "")
-        tail_ip = raw.get("tailIP", "")
-        password = raw.get("password", "")
-        if not host or not tail_ip:
-            continue
-        if not isinstance(password, str):
-            continue
-        try:
-            port = int(raw.get("port", DEFAULT_PORT))
-        except (TypeError, ValueError):
-            continue
-        if not 1 <= port <= 65535:
-            continue
-        digest = (
-            hashlib.sha256(password.encode("utf-8")).hexdigest()[:12]
-            if password
-            else "no-auth"
-        )
-        inbox.append(
-            {
-                "file": path,
-                "host": str(host),
-                "tailIP": str(tail_ip),
-                "port": port,
-                "username": str(raw.get("username", "opencode") or "opencode"),
-                "created": str(raw.get("created", "") or ""),
-                "fingerprint": digest,
-            }
-        )
-    return inbox
+def discover_peers(peers):
+    if not peers:
+        return []
+    with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
+        results = list(pool.map(probe_peer, peers))
+    return sorted(results, key=lambda peer: (not peer["detected"], not peer["online"], peer["hostName"].lower()))
 
 
-def first_ip(ips):
-    for ip in ips or []:
-        if "." in str(ip):
-            return str(ip)
-    if ips:
-        return str(ips[0])
-    return ""
+def publication_url(tailscale_bin, tail, local_url):
+    if not tailscale_bin or not tail["running"] or not tail["selfDns"] or not local_url:
+        return ""
+    code, out = command_output([tailscale_bin, "serve", "status"])
+    if code != 0 or not out or "No serve config" in out or local_url not in out:
+        return ""
+    return "https://%s/" % tail["selfDns"]
 
 
 def payload():
+    migrate_legacy_config()
+    remove_legacy_pairing_files()
     opencode_bin = shutil.which("opencode")
     tailscale_bin = shutil.which("tailscale")
-    config_path, config_exists, config = load_config()
-
+    tail = tailscale_status(tailscale_bin)
+    local_url = service_status_url(opencode_bin) if opencode_bin else ""
+    public_url = publication_url(tailscale_bin, tail, local_url)
     data = {
         "ok": True,
-        "opencode": {"installed": opencode_bin is not None, "version": ""},
-        "config": {
-            "path": config_path,
-            "exists": config_exists,
-            "hasPassword": config["password"] != "",
-            "port": config["port"],
-        },
-        "local": {"reachable": False, "url": "", "serveUrl": "", "error": "", "sessions": [], "history": [], "total": 0},
+        "opencode": {"installed": bool(opencode_bin), "version": ""},
+        "local": {"reachable": False, "url": "", "error": "", "sessions": [], "history": [], "total": 0},
         "tailscale": {
-            "installed": tailscale_bin is not None,
-            "running": False,
-            "selfName": "",
-            "selfIps": [],
-            "peers": [],
+            **{key: tail[key] for key in ("installed", "running", "selfName", "selfIps")},
+            "peers": discover_peers(tail["peers"]) if tail["running"] else [],
         },
-        "pairing": {"inbox": pairing_inbox()},
+        "publication": {"published": bool(public_url), "url": public_url},
         "lastError": "",
     }
-
-    if opencode_bin:
-        exit_code, out = command_output([opencode_bin, "--version"], 5)
-        if exit_code == 0 and out:
-            data["opencode"]["version"] = out.splitlines()[0]
-
-        url = service_status_url(opencode_bin)
-        if url:
-            password = local_password()
-            ok, error, sessions, history, total = list_sessions(
-                url, password, config["timeoutSec"], only_active=True
-            )
-            data["local"]["url"] = url
-            data["local"]["reachable"] = ok
-            data["local"]["error"] = error
-            data["local"]["sessions"] = sessions
-            data["local"]["history"] = history
-            data["local"]["total"] = total
-        else:
-            data["local"]["error"] = "background service not running"
-    else:
+    if not opencode_bin:
         data["lastError"] = "opencode is not installed"
-
-    tail = tailscale_status(tailscale_bin)
-    data["tailscale"]["running"] = tail["running"]
-    data["tailscale"]["selfName"] = tail["selfName"]
-    data["tailscale"]["selfIps"] = tail["selfIps"]
-    if tail["selfDns"]:
-        _serve_code, _serve_out = command_output([tailscale_bin, "serve", "status"], 8) if tailscale_bin else (1, "")
-        if _serve_code == 0 and "No serve config" not in _serve_out:
-            data["local"]["serveUrl"] = "https://%s/" % tail["selfDns"]
-
-    for peer in tail["rawPeers"]:
-        entry = dict(peer)
-        entry["reachable"] = False
-        entry["url"] = ""
-        entry["error"] = ""
-        entry["sessions"] = []
-        if not peer["online"]:
-            entry["error"] = "offline"
-        elif not opencode_bin:
-            entry["error"] = "opencode is not installed"
-        else:
-            password, port = peer_credentials(config, peer["hostName"])
-            ip = first_ip(peer["ips"])
-            dns = str(peer.get("dnsName", "") or "").rstrip(".")
-            # Each server is paired to its tailnet URL via `tailscale serve`,
-            # so prefer https://<host>.<tailnet>.ts.net/ and fall back to
-            # the raw tailnet IP for machines without serve configured.
-            candidates = []
-            if dns:
-                candidates.append("https://%s" % dns)
-            if ip:
-                candidates.append("http://%s:%d" % (ip, port))
-            if not candidates:
-                entry["error"] = "no tailscale address"
-            else:
-                ok, error, sessions = False, "", []
-                for url in candidates:
-                    entry["url"] = url
-                    ok, error, sessions, _history, _total = list_sessions(
-                        url, password, config["timeoutSec"]
-                    )
-                    if ok:
-                        break
-                entry["reachable"] = ok
-                entry["error"] = error
-                entry["sessions"] = sessions
-        data["tailscale"]["peers"].append(entry)
-
+        return data
+    code, version = command_output([opencode_bin, "--version"], 5)
+    if code == 0:
+        data["opencode"]["version"] = version.splitlines()[0] if version else ""
+    data["local"]["url"] = local_url
+    if not local_url:
+        data["local"]["error"] = "background service not running"
+        return data
+    ok, error, sessions, history, total = list_sessions(local_url, service_password(), public_url)
+    data["local"].update({"reachable": ok, "error": error, "sessions": sessions, "history": history, "total": total})
     return data
 
 
-def main():
-    print(json.dumps(payload()))
-    return 0
-
-
 if __name__ == "__main__":
-    sys.exit(main())
+    print(json.dumps(payload()))
+    sys.exit(0)

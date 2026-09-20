@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0
+
+- Reframed the plugin as a local OpenCode publisher. Each machine now manages
+  only its own service and Tailscale Serve mapping.
+- Removed Taildrop pairing, peer credential storage, remote TUI launching, and
+  cross-machine polling.
+- On first refresh, removes legacy pairing credentials from plugin config and
+  recognized `opencode-pair-*.json` files from Downloads.
+- Active sessions now open in the published OpenCode web UI.
+- Restored read-only discovery of OpenCode servers published by online
+  Tailscale peers, with browser navigation and no credential exchange.
+
 ## 0.5.0
 
 - Tailnet URLs are the design: expose maps each server to

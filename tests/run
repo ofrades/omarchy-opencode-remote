@@ -1,181 +1,110 @@
 #!/usr/bin/env bash
-# Smoke tests for the omarchy-opencode-remote plugin. No shell state is
-# changed: the helper only reads, and the Model.js tests run in node.
 set -euo pipefail
-
 cd "$(dirname "$0")/.."
 
-echo "== python syntax =="
-python3 -m py_compile opencode_remote_status.py opencode-remote-connect opencode-remote-pair
+echo "== syntax =="
+python3 -m py_compile opencode_remote_status.py opencode-remote-publish
 echo OK
 
 echo "== helper output =="
-python3 opencode_remote_status.py | python3 -c "
+python3 opencode_remote_status.py | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
-assert d.get('ok') is True, 'ok flag missing'
-assert 'opencode' in d and 'config' in d and 'local' in d and 'tailscale' in d
-assert isinstance(d['local'].get('sessions'), list), 'local sessions missing'
-assert isinstance(d['local'].get('total'), int), 'local total missing'
-assert isinstance(d['local'].get('history'), list), 'local history missing'
-assert len(d['local']['sessions']) <= d['local']['total'], 'open filter broken'
-assert len(d['local']['sessions']) + len(d['local']['history']) == d['local']['total'], 'open+history != total'
-assert isinstance(d['tailscale'].get('peers'), list), 'peers missing'
-assert isinstance(d.get('pairing', {}).get('inbox'), list), 'pairing inbox missing'
-for peer in d['tailscale']['peers']:
-    assert isinstance(peer.get('sessions'), list), 'peer sessions missing'
-print('local sessions:', len(d['local']['sessions']), '| peers:', len(d['tailscale']['peers']), '| local reachable:', d['local'].get('reachable'))
-"
-echo "== connect script help =="
-python3 opencode-remote-connect --help | grep -q "Usage"
-echo OK
-echo "== pair script help =="
-python3 opencode-remote-pair --help | grep -q "Usage"
-echo OK
+assert d.get("ok") is True
+assert set(("opencode", "local", "tailscale", "publication")) <= set(d)
+assert isinstance(d["local"]["sessions"], list)
+assert isinstance(d["local"]["history"], list)
+assert isinstance(d["publication"]["published"], bool)
+assert isinstance(d["tailscale"]["peers"], list)
+print("active:", len(d["local"]["sessions"]), "| published:", d["publication"]["published"], "| peers:", len(d["tailscale"]["peers"]))
+'
 
-echo "== pairing trust flow (sandboxed HOME) =="
-export SANDBOX_HOME="$(mktemp -d)"
-export SANDBOX_XDG="$SANDBOX_HOME/.config"
-mkdir -p "$SANDBOX_HOME/Downloads" "$SANDBOX_XDG" "$SANDBOX_HOME/bin"
-cat > "$SANDBOX_HOME/bin/tailscale" <<'EOF'
-#!/usr/bin/env python3
-import json
-print(json.dumps({"BackendState": "Running", "Peer": {"node": {
-    "HostName": "desktop", "TailscaleIPs": ["100.1.1.3"], "Online": True
-}}}))
-EOF
-chmod 755 "$SANDBOX_HOME/bin/tailscale"
-cat > "$SANDBOX_HOME/Downloads/opencode-pair-test.json" <<'EOF'
-{"app": "omarchy-opencode-remote-pair", "v": 1, "host": "desktop", "tailIP": "100.1.1.3", "port": 49374, "username": "opencode", "password": "s3cr3t-test-password", "created": "2026-09-17T00:00:00+0000"}
-EOF
-chmod 600 "$SANDBOX_HOME/Downloads/opencode-pair-test.json"
-HOME="$SANDBOX_HOME" XDG_CONFIG_HOME="$SANDBOX_XDG" python3 opencode_remote_status.py | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-inbox = d['pairing']['inbox']
-assert len(inbox) == 1, inbox
-assert inbox[0]['host'] == 'desktop' and inbox[0]['port'] == 49374, inbox
-assert 'password' not in json.dumps(inbox) or 's3cr3t' not in json.dumps(inbox), 'secret leaked into status output'
-print('inbox:', inbox[0]['host'], inbox[0]['fingerprint'])
-"
-HOME="$SANDBOX_HOME" XDG_CONFIG_HOME="$SANDBOX_XDG" PATH="$SANDBOX_HOME/bin:$PATH" python3 opencode-remote-pair trust "$SANDBOX_HOME/Downloads/opencode-pair-test.json" | grep -q "Trusted desktop"
-test ! -e "$SANDBOX_HOME/Downloads/opencode-pair-test.json"
-HOME="$SANDBOX_HOME" XDG_CONFIG_HOME="$SANDBOX_XDG" python3 -c "
-import json
-cfg = json.load(open('$SANDBOX_HOME/.config/omarchy-opencode-remote/config.json'))
-assert cfg['peers']['desktop']['password'] == 's3cr3t-test-password', cfg
-assert cfg['peers']['desktop']['port'] == 49374, cfg
-print('config entry OK')
-"
-HOME="$SANDBOX_HOME" XDG_CONFIG_HOME="$SANDBOX_XDG" python3 opencode_remote_status.py | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-assert d['pairing']['inbox'] == [], 'inbox not drained'
-print('inbox drained OK')
-"
+echo "== browser route =="
+python3 -c '
+import importlib.util
+spec = importlib.util.spec_from_file_location("status", "opencode_remote_status.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+url = module.web_session_url("https://laptop.example.ts.net/", "ses_abc")
+assert url == "https://laptop.example.ts.net/server/aHR0cHM6Ly9sYXB0b3AuZXhhbXBsZS50cy5uZXQ/session/ses_abc", url
+assert module.web_session_url("", "ses_abc") == ""
+print(url)
+'
 
-echo "== pairing trust rejects unsafe input =="
-cat > "$SANDBOX_HOME/outside.json" <<'EOF'
-{"app": "omarchy-opencode-remote-pair", "v": 1, "host": "desktop", "tailIP": "100.1.1.3", "port": 49374, "username": "opencode", "password": "secret", "created": "2026-09-17T00:00:00+0000"}
-EOF
-chmod 600 "$SANDBOX_HOME/outside.json"
-if HOME="$SANDBOX_HOME" XDG_CONFIG_HOME="$SANDBOX_XDG" PATH="$SANDBOX_HOME/bin:$PATH" python3 opencode-remote-pair trust "$SANDBOX_HOME/outside.json" 2>/dev/null; then
-  echo "FAIL: trusted a file outside Downloads" >&2; exit 1
-fi
-ln -s "$SANDBOX_HOME/outside.json" "$SANDBOX_HOME/Downloads/opencode-pair-link.json"
-if HOME="$SANDBOX_HOME" XDG_CONFIG_HOME="$SANDBOX_XDG" PATH="$SANDBOX_HOME/bin:$PATH" python3 opencode-remote-pair trust "$SANDBOX_HOME/Downloads/opencode-pair-link.json" 2>/dev/null; then
-  echo "FAIL: trusted a symlink" >&2; exit 1
-fi
-cp "$SANDBOX_HOME/outside.json" "$SANDBOX_HOME/Downloads/opencode-pair-readable.json"
-chmod 644 "$SANDBOX_HOME/Downloads/opencode-pair-readable.json"
-if HOME="$SANDBOX_HOME" XDG_CONFIG_HOME="$SANDBOX_XDG" PATH="$SANDBOX_HOME/bin:$PATH" python3 opencode-remote-pair trust "$SANDBOX_HOME/Downloads/opencode-pair-readable.json" 2>/dev/null; then
-  echo "FAIL: trusted a group/world-readable credential" >&2; exit 1
-fi
-sed 's/100.1.1.3/100.9.9.9/' "$SANDBOX_HOME/outside.json" > "$SANDBOX_HOME/Downloads/opencode-pair-spoofed.json"
-chmod 600 "$SANDBOX_HOME/Downloads/opencode-pair-spoofed.json"
-if HOME="$SANDBOX_HOME" XDG_CONFIG_HOME="$SANDBOX_XDG" PATH="$SANDBOX_HOME/bin:$PATH" python3 opencode-remote-pair trust "$SANDBOX_HOME/Downloads/opencode-pair-spoofed.json" 2>/dev/null; then
-  echo "FAIL: trusted a mismatched Tailscale identity" >&2; exit 1
-fi
-sed 's/"secret"/""/' "$SANDBOX_HOME/outside.json" > "$SANDBOX_HOME/Downloads/opencode-pair-empty.json"
-chmod 600 "$SANDBOX_HOME/Downloads/opencode-pair-empty.json"
-if HOME="$SANDBOX_HOME" XDG_CONFIG_HOME="$SANDBOX_XDG" PATH="$SANDBOX_HOME/bin:$PATH" python3 opencode-remote-pair trust "$SANDBOX_HOME/Downloads/opencode-pair-empty.json" 2>/dev/null; then
-  echo "FAIL: trusted an empty credential" >&2; exit 1
-fi
-echo OK
-rm -rf "$SANDBOX_HOME"
-unset SANDBOX_HOME SANDBOX_XDG
+echo "== legacy credential cleanup =="
+MIGRATION_HOME="$(mktemp -d)"
+mkdir -p "$MIGRATION_HOME/omarchy-opencode-remote"
+mkdir -p "$MIGRATION_HOME/home/Downloads"
+cat > "$MIGRATION_HOME/omarchy-opencode-remote/config.json" <<'JSON'
+{"port": 4444, "password": "old-secret", "timeoutSec": 3, "peers": {"desktop": {"password": "peer-secret"}}}
+JSON
+cat > "$MIGRATION_HOME/home/Downloads/opencode-pair-old.json" <<'JSON'
+{"app": "omarchy-opencode-remote-pair", "password": "old-secret"}
+JSON
+cat > "$MIGRATION_HOME/home/Downloads/opencode-pair-unrelated.json" <<'JSON'
+{"app": "something-else", "password": "keep-me"}
+JSON
+HOME="$MIGRATION_HOME/home" XDG_CONFIG_HOME="$MIGRATION_HOME" python3 -c '
+import importlib.util, json, os
+spec = importlib.util.spec_from_file_location("status", "opencode_remote_status.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.migrate_legacy_config()
+module.remove_legacy_pairing_files()
+path = os.path.join(os.environ["XDG_CONFIG_HOME"], "omarchy-opencode-remote", "config.json")
+assert json.load(open(path)) == {"port": 4444}
+assert oct(os.stat(path).st_mode & 0o777) == "0o600"
+downloads = os.path.join(os.environ["HOME"], "Downloads")
+assert not os.path.exists(os.path.join(downloads, "opencode-pair-old.json"))
+assert os.path.exists(os.path.join(downloads, "opencode-pair-unrelated.json"))
+'
+rm -rf "$MIGRATION_HOME"
 echo OK
 
 if command -v node >/dev/null 2>&1; then
-  echo "== Model.js =="
-  node -e "
-const M = require('./Model.js');
-const empty = M.parseStatus('');
-console.assert(Array.isArray(empty.local.sessions) && empty.local.sessions.length === 0, 'empty parse');
-const sample = JSON.stringify({ ok: true, opencode: { installed: true, version: '2.0.5' }, config: { path: '/home/u/.config/omarchy-opencode-remote/config.json', exists: true, hasPassword: true, port: 49374 }, local: { reachable: true, url: 'http://127.0.0.1:49374', error: '', sessions: [{ id: 'ses_abc', title: 'Fix bug', directory: '/home/u/proj', agent: 'build', model: 'anthropic/claude-sonnet-4-5', updatedAt: new Date().toISOString() }] }, tailscale: { installed: true, running: true, selfName: 'laptop', selfIps: ['100.1.1.2'], peers: [{ hostName: 'desktop', dnsName: '', os: 'linux', online: true, ips: ['100.1.1.3'], reachable: true, url: 'http://100.1.1.3:49374', error: '', sessions: [{ id: 'ses_def', title: '', directory: '/home/u/other', agent: '', model: 'openai/gpt-5', updatedAt: new Date(Date.now() - 3600e3).toISOString() }] }] }, lastError: '' });
-const p = M.parseStatus(sample);
-console.assert(p.local.sessions.length === 1 && p.local.sessions[0].title === 'Fix bug', 'local parse');
-console.assert(p.local.total === 0, 'local total defaults to 0');
-console.assert(Array.isArray(p.local.history) && p.local.history.length === 0, 'local history defaults empty');
-console.assert(p.tailscale.peers[0].sessions[0].title === 'Untitled session', 'title fallback');
-console.assert(M.totalSessions(p) === 2, 'total count');
-console.assert(M.reachableHosts(p) === 2, 'reachable count');
-console.assert(M.sessionSubtitle(p.local.sessions[0]).indexOf('/home/u/proj') === 0, 'subtitle');
-console.assert(M.relativeTime(new Date().toISOString()) === 'Just now', 'relative time');
-console.assert(M.peerLabel(p.tailscale.peers[0]) === 'desktop · 100.1.1.3', 'peer label');
-console.assert(M.isConfigured(p) === true, 'configured');
-const paired = M.parseStatus(JSON.stringify({ pairing: { inbox: [{ file: '/home/u/Downloads/opencode-pair-x.json', host: 'desktop', tailIP: '100.1.1.3', port: 49374, username: 'opencode', created: '2026-09-17', fingerprint: 'abc123' }, null] } }));
-console.assert(paired.pairing.inbox.length === 1 && paired.pairing.inbox[0].host === 'desktop', 'pairing inbox');
-const bad = M.parseStatus('{nope');
-console.assert(bad.ok === false, 'bad json');
-console.log('Model.js OK');
-"
-else
-  echo "(node missing, skipping Model.js tests)"
+  echo "== model =="
+  node - <<'JS'
+const M = require('./Model.js')
+const parsed = M.parseStatus(JSON.stringify({
+  opencode: { installed: true, version: '2.0.0' },
+  local: { reachable: true, total: 1, sessions: [{ id: 'ses_abc', title: 'Build', webUrl: 'https://host/session' }] },
+  tailscale: { installed: true, running: true, selfName: 'laptop', selfIps: ['100.1.1.2'], peers: [{ hostName: 'desktop', dnsName: 'desktop.example.ts.net', online: true, detected: true, loginRequired: true, url: 'https://desktop.example.ts.net/' }] },
+  publication: { published: true, url: 'https://laptop.example.ts.net/' }
+}))
+console.assert(parsed.local.sessions.length === 1, 'session parse')
+console.assert(parsed.local.sessions[0].webUrl === 'https://host/session', 'web URL parse')
+console.assert(parsed.publication.published === true, 'publication parse')
+console.assert(parsed.tailscale.peers.length === 1 && parsed.tailscale.peers[0].loginRequired === true, 'peer parse')
+console.assert(M.relativeTime(new Date().toISOString()) === 'Just now', 'relative time')
+console.log('Model.js OK')
+JS
 fi
 
-echo "== serveUrl =="
-node -e "
-const M = require('./Model.js');
-const d = M.defaultStatus();
-console.assert(d.local.serveUrl === '', 'default serveUrl');
-const p = M.parseStatus(JSON.stringify({ local: { reachable: true, url: 'http://100.9.9.9:49374', serveUrl: 'https://laptop.example.ts.net/' } }));
-console.assert(p.local.serveUrl === 'https://laptop.example.ts.net/', 'serveUrl parse');
-console.assert(p.local.url === 'http://100.9.9.9:49374', 'url kept');
-console.log('serveUrl OK');
-"
-python3 -c "
-import json, subprocess
-d = json.loads(subprocess.run(['python3', 'opencode_remote_status.py'], check=True, capture_output=True, text=True).stdout)
-assert 'serveUrl' in d['local'], 'serveUrl missing from helper payload'
-print('helper serveUrl:', repr(d['local']['serveUrl']))
-"
+echo "== removed credential exchange =="
+test ! -e opencode-remote-pair
+test ! -e opencode-remote-connect
+if grep -RniE 'Taildrop|pairingInbox|trustPairing|peer_credentials|openRemoteSession' -- README.md Model.js Service.qml Panel.qml opencode_remote_status.py opencode-remote-publish; then
+  echo "FAIL: credential-exchange code remains" >&2
+  exit 1
+fi
+echo OK
 
 if command -v omarchy >/dev/null 2>&1; then
   echo "== omarchy plugin validate =="
   omarchy plugin validate .
-  echo OK
-else
-  echo "(omarchy missing, skipping validate)"
 fi
 
-echo "== QML guards =="
-# The Qt toolchain on some machines predates the typed-JS syntax stock
-# Omarchy plugins use, so qmllint/qmlformat can fail even on first-party
-# files. Only run them when they pass on a stock plugin (canary).
-if command -v qmllint >/dev/null 2>&1 && [ -n "${OMARCHY_PATH:-}" ] \
-  && qmllint -I "$OMARCHY_PATH/shell" "$OMARCHY_PATH/shell/plugins/panels/clock/BarWidget.qml" >/dev/null 2>&1; then
-  echo "== qmllint =="
-  qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml Panel.qml Service.qml
-  echo OK
-else
-  echo "(qmllint too old for stock plugins here, skipping)"
-fi
-# No optional-chaining / nullish-coalescing: not guaranteed in the QML engine.
-if grep -n "?\.\|??" BarWidget.qml Panel.qml Service.qml Model.js opencode-remote-connect opencode-remote-pair; then
+if grep -n "?\.\|??" BarWidget.qml Panel.qml Service.qml Model.js; then
   echo "FAIL: unsupported JS syntax found" >&2
   exit 1
 fi
-echo OK
+if grep -nE 'onClicked: [^{][^}]*; [^}]' Panel.qml; then
+  echo "FAIL: multi-statement QML signal handler needs braces" >&2
+  exit 1
+fi
+if grep -nE '\};[[:space:]]+[A-Za-z]+:' BarWidget.qml Panel.qml Service.qml; then
+  echo "FAIL: QML child objects cannot be separated with semicolons" >&2
+  exit 1
+fi
 
 echo "ALL GREEN"
