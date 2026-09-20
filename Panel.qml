@@ -21,11 +21,15 @@ Panel {
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property int totalCount: service.localSessions.length
-  readonly property int hostCount: (service.published ? 1 : 0) + service.peers.filter(function(peer) { return peer.detected === true }).length
+  readonly property int remoteCount: service.peers.filter(function(peer) { return peer.detected === true }).length
+  readonly property int unavailableCount: service.peers.filter(function(peer) { return peer.online === true && peer.detected !== true }).length
+  readonly property int hostCount: (service.published ? 1 : 0) + remoteCount
   readonly property bool healthy: service.configured
-  readonly property string heroMeta: service.configured
-    ? totalCount + (totalCount === 1 ? " active session" : " active sessions")
-    : "Publish this machine for remote access"
+  readonly property string heroMeta: currentTab === "remote"
+    ? remoteCount + (remoteCount === 1 ? " server ready" : " servers ready")
+    : service.configured
+      ? totalCount + (totalCount === 1 ? " active session" : " active sessions")
+      : "Remote access needs attention"
 
   function open() { refresh(); controller.show() }
   function close() { controller.hide() }
@@ -110,13 +114,17 @@ Panel {
           Column {
             visible: root.currentTab === "local"
             width: parent.width
-            spacing: Style.space(6)
+            spacing: Style.space(10)
 
             PanelSectionHeader { text: "THIS MACHINE"; foreground: root.foreground; fontFamily: root.fontFamily }
 
-            StatusRow { label: "OpenCode"; value: service.localReachable ? "Running" : (service.opencodeInstalled ? "Stopped" : "Not installed"); good: service.localReachable }
-            StatusRow { label: "Tailscale"; value: service.tailscaleRunning ? "Connected" : (service.tailscaleInstalled ? "Offline" : "Not installed"); good: service.tailscaleRunning }
-            StatusRow { label: "Published"; value: service.published ? "Available" : "Not configured"; good: service.published }
+            RowLayout {
+              width: parent.width
+              spacing: Style.space(6)
+              StatusBadge { label: "OpenCode"; value: service.localReachable ? "Running" : (service.opencodeInstalled ? "Stopped" : "Missing"); good: service.localReachable; Layout.fillWidth: true }
+              StatusBadge { label: "Tailscale"; value: service.tailscaleRunning ? "Connected" : (service.tailscaleInstalled ? "Offline" : "Missing"); good: service.tailscaleRunning; Layout.fillWidth: true }
+              StatusBadge { label: "Remote"; value: service.published ? "Ready" : "Off"; good: service.published; Layout.fillWidth: true }
+            }
 
             Text {
               visible: service.actionStatus !== "" || service.lastError !== ""
@@ -131,20 +139,17 @@ Panel {
 
             ActionRow {
               visible: !service.configured
-              title: "Publish this machine"
-              subtitle: "Start OpenCode and serve it securely through Tailscale"
+              title: service.published ? "Repair remote access" : "Enable remote access"
+              subtitle: "Start OpenCode and connect it through Tailscale"
               onClicked: service.publish()
             }
 
-            Text {
+            RowLayout {
               visible: service.published
               width: parent.width
-              textFormat: Text.PlainText
-              text: service.publicUrl
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              elide: Text.ElideMiddle
+              spacing: Style.space(6)
+              Text { textFormat: Text.PlainText; text: "●"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+              Text { textFormat: Text.PlainText; text: service.publicUrl; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption; elide: Text.ElideMiddle; Layout.fillWidth: true }
             }
 
             ActionRow { visible: service.published; title: "Open dashboard"; subtitle: "Open OpenCode in your browser"; onClicked: { service.openDashboard(); root.close() } }
@@ -155,17 +160,11 @@ Panel {
             width: parent.width
             spacing: Style.space(6)
 
-            PanelSectionHeader { text: "ACTIVE SESSIONS"; foreground: root.foreground; fontFamily: root.fontFamily }
+            PanelSectionHeader { text: "ACTIVE · " + service.localSessions.length; foreground: root.foreground; fontFamily: root.fontFamily }
 
-            Text {
+            EmptyState {
               visible: service.localSessions.length === 0
-              width: parent.width
-              textFormat: Text.PlainText
-              text: "No active sessions."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              horizontalAlignment: Text.AlignHCenter
+              message: "No active sessions"
             }
 
             Repeater {
@@ -191,9 +190,19 @@ Panel {
           Column {
             visible: root.currentTab === "remote"
             width: parent.width
-            spacing: Style.space(6)
+            spacing: Style.space(8)
 
-            PanelSectionHeader { text: "PUBLISHED SERVERS"; foreground: root.foreground; fontFamily: root.fontFamily }
+            PanelSectionHeader { text: "AVAILABLE · " + root.remoteCount; foreground: root.foreground; fontFamily: root.fontFamily }
+
+            Text {
+              visible: service.tailscaleRunning && root.remoteCount > 0
+              width: parent.width
+              textFormat: Text.PlainText
+              text: "OpenCode servers discovered on your tailnet"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
 
             Text {
               visible: !service.tailscaleRunning
@@ -211,28 +220,21 @@ Panel {
               ActionRow {
                 required property var modelData
                 title: String(modelData.hostName || "OpenCode server")
-                subtitle: modelData.loginRequired === true ? "Login required · " + String(modelData.url || "") : String(modelData.url || "")
+                subtitle: (modelData.loginRequired === true ? "Login required · " : "") + String(modelData.dnsName || modelData.url || "")
                 onClicked: { service.openPeer(modelData); root.close() }
               }
             }
 
-            Text {
+            EmptyState {
               visible: service.tailscaleRunning && service.peers.filter(function(peer) { return peer.detected === true }).length === 0
-              width: parent.width
-              textFormat: Text.PlainText
-              text: "No other published OpenCode servers detected."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              horizontalAlignment: Text.AlignHCenter
-              wrapMode: Text.WordWrap
+              message: "No published servers found"
             }
 
             Text {
-              visible: service.peers.filter(function(peer) { return peer.online === true && peer.detected !== true }).length > 0
+              visible: root.unavailableCount > 0
               width: parent.width
               textFormat: Text.PlainText
-              text: service.peers.filter(function(peer) { return peer.online === true && peer.detected !== true }).length + " online tailnet machine(s) are not publishing OpenCode."
+              text: root.unavailableCount + (root.unavailableCount === 1 ? " other online machine" : " other online machines")
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -276,13 +278,36 @@ Panel {
     }
   }
 
-  component StatusRow: RowLayout {
+  component StatusBadge: Rectangle {
     property string label: ""
     property string value: ""
     property bool good: false
+    color: "transparent"
+    border.width: 1
+    border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, good ? 0.3 : 0.12)
+    radius: Style.space(4)
+    implicitHeight: badgeContent.implicitHeight + Style.space(12)
+    Column {
+      id: badgeContent
+      anchors.centerIn: parent
+      spacing: Style.space(1)
+      Text { anchors.horizontalCenter: parent.horizontalCenter; textFormat: Text.PlainText; text: parent.parent.label; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+      Text { anchors.horizontalCenter: parent.horizontalCenter; textFormat: Text.PlainText; text: (parent.parent.good ? "● " : "○ ") + parent.parent.value; color: parent.parent.good ? root.foreground : root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
+    }
+  }
+
+  component EmptyState: Item {
+    property string message: ""
     width: parent ? parent.width : 0
-    Text { textFormat: Text.PlainText; text: parent.label; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; Layout.fillWidth: true }
-    Text { textFormat: Text.PlainText; text: parent.value; color: parent.good ? root.foreground : root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
+    implicitHeight: Style.space(52)
+    Text {
+      anchors.centerIn: parent
+      textFormat: Text.PlainText
+      text: parent.message
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+    }
   }
 
   component SessionRow: CursorSurface {
