@@ -4,16 +4,10 @@
 Queries the local opencode background service plus every online Tailscale
 peer exposing an opencode server, then prints one JSON document for QML.
 
-Each server machine must expose its service inside the tailnet and share
-one password (see README):
-
-    opencode service set hostname 0.0.0.0
-    opencode service set password "<shared-secret>"
-    opencode service start
-
-The shared secret lives in ~/.config/omarchy-opencode-remote/config.json
-(next to an optional port override). The local machine is queried through
-its own service.json, so it works even before the shared secret is set.
+Each server machine exposes its password-authenticated service inside the
+tailnet. Pairing copies the existing opencode-managed credential into the
+per-peer entries in ~/.config/omarchy-opencode-remote/config.json. The local
+machine is queried through its own service.json.
 
 Never fails hard: every probe has a timeout and any failure is reported
 inside the payload so the panel can show it instead of going blank.

@@ -32,7 +32,9 @@ decides who can reach the API at all.
 ## Setup
 
 Design: every opencode server is paired to its own tailnet URL —
-`https://<host>.<tailnet>.ts.net/` — via `tailscale serve`, no password.
+`https://<host>.<tailnet>.ts.net/` — via `tailscale serve`. The endpoint
+retains opencode's password authentication; pairing transfers that existing
+credential to the selected tailnet peer.
 Phones and other machines just open that URL. Two ways to expose a
 machine; the widget needs no manual server commands:
 
@@ -42,7 +44,10 @@ machine; the widget needs no manual server commands:
    with `tailscale serve`. The service password is left alone (opencode
    enforces it, so it stays stable).
    It also Taildrops the effective credential to that peer — on their side an
-   *Incoming pairing* appears at the top, click **Trust**, and your
+   *Incoming pairing* appears at the top. Verify the displayed host, tailnet
+   IP, and credential fingerprint, then click **Trust**. Trust only accepts a
+   private, current-user-owned regular file from `~/Downloads` whose claimed
+   host and IP match an online peer reported by Tailscale. Your
    sessions appear there after the next refresh.
 2. **Manual.** Same steps by hand:
 

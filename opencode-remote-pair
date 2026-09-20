@@ -2,11 +2,10 @@
 """One-click tailnet pairing for omarchy-opencode-remote.
 
 Usage:
-  opencode-remote-pair send [peer-host] Expose this machine's opencode
-                                          server at https://<host>.<tailnet>.ts.net/
-                                          (no password, tailnet-only). With a
-                                          peer, also Taildrop a no-auth notice
-                                          for one-click trust.
+  opencode-remote-pair send [peer-host] Expose this machine's authenticated
+                                          opencode server at its tailnet URL.
+                                          With a peer, Taildrop its existing
+                                          credential for explicit trust.
   opencode-remote-pair trust <file>       Trust an incoming pairing file from
                                           ~/Downloads: stores the peer and
                                           deletes the file.
@@ -20,6 +19,7 @@ one on the background service, so it stays stable across exposes.
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -46,6 +46,29 @@ def widget_config_path():
 
 def service_config_path():
     return os.path.join(config_home(), "opencode", "service.json")
+
+
+def validate_pairing_file(path):
+    """Reject credentials outside the Taildrop inbox or exposed to other users."""
+    downloads = os.path.realpath(os.path.join(os.path.expanduser("~"), "Downloads"))
+    candidate = os.path.abspath(path)
+    resolved = os.path.realpath(candidate)
+    if os.path.dirname(resolved) != downloads:
+        return "pairing file must be directly inside ~/Downloads"
+    name = os.path.basename(candidate)
+    if not name.startswith("opencode-pair-") or not name.endswith(".json"):
+        return "unexpected pairing filename"
+    try:
+        info = os.lstat(candidate)
+    except OSError:
+        return "pairing file does not exist"
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return "pairing file must be a regular file, not a link"
+    if info.st_uid != os.getuid():
+        return "pairing file is not owned by the current user"
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        return "pairing file permissions expose the credential; run chmod 600 first"
+    return ""
 
 
 def run(command, timeout):
@@ -220,6 +243,32 @@ def serve_dns_name():
     return str(yourself.get("DNSName", "") or "").rstrip(".")
 
 
+def verify_tailnet_identity(host, tail_ip):
+    """Confirm the credential's claimed host/IP is a current Tailscale peer."""
+    tailscale_bin = shutil.which("tailscale")
+    if not tailscale_bin:
+        return False, "tailscale is not installed"
+    exit_code, out = run([tailscale_bin, "status", "--json"], 8)
+    if exit_code != 0 or not out:
+        return False, "could not verify the sender with Tailscale"
+    try:
+        status = json.loads(out)
+    except ValueError:
+        return False, "could not verify the sender with Tailscale"
+    wanted = str(host).casefold()
+    peers = status.get("Peer", {}) or {}
+    for peer in peers.values():
+        if not isinstance(peer, dict):
+            continue
+        peer_host = str(peer.get("HostName", "") or "")
+        peer_ips = [str(ip) for ip in (peer.get("TailscaleIPs", []) or [])]
+        if peer_host.casefold() == wanted and str(tail_ip) in peer_ips:
+            if peer.get("Online") is not True:
+                return False, "the claimed Tailscale peer is offline"
+            return True, ""
+    return False, "pairing identity does not match a Tailscale peer"
+
+
 def cmd_send(peer):
     opencode_bin = shutil.which("opencode")
     if not opencode_bin:
@@ -230,6 +279,10 @@ def cmd_send(peer):
     if not peer:
         peer = ""
     config = widget_config()
+    pairing_host = tail_self_name() if peer else ""
+    pairing_ip = tail_ipv4() if peer else ""
+    if peer and (not pairing_host or not pairing_ip):
+        return fail("could not determine this machine's Tailscale identity")
     # Never manage the password: opencode enforces one on the background
     # service and regenerates it on start when missing. We leave it alone
     # and share whatever is effective after start, so it stays stable.
@@ -266,6 +319,8 @@ def cmd_send(peer):
         port = config["port"]
     # Effective password post-start (opencode guarantees one exists).
     password = service_password()
+    if not password:
+        return fail("opencode service has no password; refusing to expose it")
     target = "http://%s:%d" % (bind if bind else "127.0.0.1", port)
 
     # Pair the server to its tailnet URL: https://<host>.<tailnet>.ts.net/
@@ -280,7 +335,7 @@ def cmd_send(peer):
         serve_note = " — https://%s" % dns if dns else " — https enabled"
 
     if not peer:
-        print("Exposed on the tailnet%s — no password." % serve_note)
+        print("Exposed on the tailnet%s — opencode authentication retained." % serve_note)
         if not bind:
             print("Note: bound to all interfaces (Tailscale was unreachable).")
         return 0
@@ -288,8 +343,8 @@ def cmd_send(peer):
     credential = {
         "app": PAIR_APP_TAG,
         "v": 1,
-        "host": tail_self_name() or "unknown",
-        "tailIP": tail_ipv4(),
+        "host": pairing_host,
+        "tailIP": pairing_ip,
         "port": port,
         "username": "opencode",
         "password": password,
@@ -324,13 +379,18 @@ def cmd_send(peer):
 
 
 def cmd_trust(path):
+    unsafe = validate_pairing_file(path)
+    if unsafe:
+        return fail(unsafe)
     raw = load_json_file(path)
     if raw is None or raw.get("app") != PAIR_APP_TAG:
         return fail("'%s' is not a pairing file" % path)
+    if raw.get("v") != 1:
+        return fail("unsupported pairing file version")
     host = raw.get("host", "")
     tail_ip = raw.get("tailIP", "")
     password = raw.get("password", "")
-    if not isinstance(password, str):
+    if not isinstance(password, str) or not password:
         return fail("pairing file is incomplete")
     try:
         port = int(raw.get("port", 0))
@@ -338,8 +398,9 @@ def cmd_trust(path):
         port = 0
     if not host or not tail_ip or not 1 <= port <= 65535:
         return fail("pairing file is incomplete")
-    if os.path.basename(path).startswith("."):
-        return fail("refusing a hidden file")
+    verified, verify_error = verify_tailnet_identity(host, tail_ip)
+    if not verified:
+        return fail(verify_error)
 
     config = widget_config()
     peers = config["peers"]

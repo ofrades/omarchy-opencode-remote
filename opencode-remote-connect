@@ -54,7 +54,7 @@ def load_config():
 def credentials_for(config_password, config_port, peers, host, ip):
     """Pairing entry (by hostname, then by IP) wins over the shared secret.
 
-    An explicit entry with an empty password means no auth (tailnet-only).
+    Pairing entries normally contain an opencode-managed service password.
     """
     for key in (host, ip):
         if not key:

@@ -36,10 +36,19 @@ echo OK
 echo "== pairing trust flow (sandboxed HOME) =="
 export SANDBOX_HOME="$(mktemp -d)"
 export SANDBOX_XDG="$SANDBOX_HOME/.config"
-mkdir -p "$SANDBOX_HOME/Downloads" "$SANDBOX_XDG"
+mkdir -p "$SANDBOX_HOME/Downloads" "$SANDBOX_XDG" "$SANDBOX_HOME/bin"
+cat > "$SANDBOX_HOME/bin/tailscale" <<'EOF'
+#!/usr/bin/env python3
+import json
+print(json.dumps({"BackendState": "Running", "Peer": {"node": {
+    "HostName": "desktop", "TailscaleIPs": ["100.1.1.3"], "Online": True
+}}}))
+EOF
+chmod 755 "$SANDBOX_HOME/bin/tailscale"
 cat > "$SANDBOX_HOME/Downloads/opencode-pair-test.json" <<'EOF'
 {"app": "omarchy-opencode-remote-pair", "v": 1, "host": "desktop", "tailIP": "100.1.1.3", "port": 49374, "username": "opencode", "password": "s3cr3t-test-password", "created": "2026-09-17T00:00:00+0000"}
 EOF
+chmod 600 "$SANDBOX_HOME/Downloads/opencode-pair-test.json"
 HOME="$SANDBOX_HOME" XDG_CONFIG_HOME="$SANDBOX_XDG" python3 opencode_remote_status.py | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
@@ -49,7 +58,7 @@ assert inbox[0]['host'] == 'desktop' and inbox[0]['port'] == 49374, inbox
 assert 'password' not in json.dumps(inbox) or 's3cr3t' not in json.dumps(inbox), 'secret leaked into status output'
 print('inbox:', inbox[0]['host'], inbox[0]['fingerprint'])
 "
-HOME="$SANDBOX_HOME" XDG_CONFIG_HOME="$SANDBOX_XDG" python3 opencode-remote-pair trust "$SANDBOX_HOME/Downloads/opencode-pair-test.json" | grep -q "Trusted desktop"
+HOME="$SANDBOX_HOME" XDG_CONFIG_HOME="$SANDBOX_XDG" PATH="$SANDBOX_HOME/bin:$PATH" python3 opencode-remote-pair trust "$SANDBOX_HOME/Downloads/opencode-pair-test.json" | grep -q "Trusted desktop"
 test ! -e "$SANDBOX_HOME/Downloads/opencode-pair-test.json"
 HOME="$SANDBOX_HOME" XDG_CONFIG_HOME="$SANDBOX_XDG" python3 -c "
 import json
@@ -64,6 +73,35 @@ d = json.load(sys.stdin)
 assert d['pairing']['inbox'] == [], 'inbox not drained'
 print('inbox drained OK')
 "
+
+echo "== pairing trust rejects unsafe input =="
+cat > "$SANDBOX_HOME/outside.json" <<'EOF'
+{"app": "omarchy-opencode-remote-pair", "v": 1, "host": "desktop", "tailIP": "100.1.1.3", "port": 49374, "username": "opencode", "password": "secret", "created": "2026-09-17T00:00:00+0000"}
+EOF
+chmod 600 "$SANDBOX_HOME/outside.json"
+if HOME="$SANDBOX_HOME" XDG_CONFIG_HOME="$SANDBOX_XDG" PATH="$SANDBOX_HOME/bin:$PATH" python3 opencode-remote-pair trust "$SANDBOX_HOME/outside.json" 2>/dev/null; then
+  echo "FAIL: trusted a file outside Downloads" >&2; exit 1
+fi
+ln -s "$SANDBOX_HOME/outside.json" "$SANDBOX_HOME/Downloads/opencode-pair-link.json"
+if HOME="$SANDBOX_HOME" XDG_CONFIG_HOME="$SANDBOX_XDG" PATH="$SANDBOX_HOME/bin:$PATH" python3 opencode-remote-pair trust "$SANDBOX_HOME/Downloads/opencode-pair-link.json" 2>/dev/null; then
+  echo "FAIL: trusted a symlink" >&2; exit 1
+fi
+cp "$SANDBOX_HOME/outside.json" "$SANDBOX_HOME/Downloads/opencode-pair-readable.json"
+chmod 644 "$SANDBOX_HOME/Downloads/opencode-pair-readable.json"
+if HOME="$SANDBOX_HOME" XDG_CONFIG_HOME="$SANDBOX_XDG" PATH="$SANDBOX_HOME/bin:$PATH" python3 opencode-remote-pair trust "$SANDBOX_HOME/Downloads/opencode-pair-readable.json" 2>/dev/null; then
+  echo "FAIL: trusted a group/world-readable credential" >&2; exit 1
+fi
+sed 's/100.1.1.3/100.9.9.9/' "$SANDBOX_HOME/outside.json" > "$SANDBOX_HOME/Downloads/opencode-pair-spoofed.json"
+chmod 600 "$SANDBOX_HOME/Downloads/opencode-pair-spoofed.json"
+if HOME="$SANDBOX_HOME" XDG_CONFIG_HOME="$SANDBOX_XDG" PATH="$SANDBOX_HOME/bin:$PATH" python3 opencode-remote-pair trust "$SANDBOX_HOME/Downloads/opencode-pair-spoofed.json" 2>/dev/null; then
+  echo "FAIL: trusted a mismatched Tailscale identity" >&2; exit 1
+fi
+sed 's/"secret"/""/' "$SANDBOX_HOME/outside.json" > "$SANDBOX_HOME/Downloads/opencode-pair-empty.json"
+chmod 600 "$SANDBOX_HOME/Downloads/opencode-pair-empty.json"
+if HOME="$SANDBOX_HOME" XDG_CONFIG_HOME="$SANDBOX_XDG" PATH="$SANDBOX_HOME/bin:$PATH" python3 opencode-remote-pair trust "$SANDBOX_HOME/Downloads/opencode-pair-empty.json" 2>/dev/null; then
+  echo "FAIL: trusted an empty credential" >&2; exit 1
+fi
+echo OK
 rm -rf "$SANDBOX_HOME"
 unset SANDBOX_HOME SANDBOX_XDG
 echo OK
