@@ -27,6 +27,12 @@ def config_home():
     )
 
 
+def state_home():
+    return os.environ.get("XDG_STATE_HOME", "").strip() or os.path.join(
+        os.path.expanduser("~"), ".local", "state"
+    )
+
+
 def migrate_legacy_config():
     """Preserve the port while deleting credentials left by pre-0.6 pairing."""
     directory = os.path.join(config_home(), "omarchy-opencode-remote")
@@ -100,8 +106,15 @@ def service_password():
         with open(path, "r", encoding="utf-8") as handle:
             raw = json.load(handle)
     except (OSError, ValueError):
+        raw = None
+    if isinstance(raw, dict) and isinstance(raw.get("password"), str) and raw["password"]:
+        return raw["password"]
+    path = os.path.join(state_home(), "opencode", "password")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
         return ""
-    return raw.get("password", "") if isinstance(raw, dict) and isinstance(raw.get("password"), str) else ""
 
 
 def fetch_json(url, password):
@@ -268,6 +281,7 @@ def payload():
             "peers": discover_peers(tail["peers"]) if tail["running"] else [],
         },
         "publication": {"published": bool(public_url), "url": public_url},
+        "authentication": {"configured": bool(service_password()), "username": "opencode"},
         "lastError": "",
     }
     if not opencode_bin:

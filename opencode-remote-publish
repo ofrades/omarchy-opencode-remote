@@ -3,6 +3,7 @@
 
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -42,14 +43,79 @@ def configured_port():
     return port if 1 <= port <= 65535 else DEFAULT_PORT
 
 
-def service_has_password():
+def state_home():
+    return os.environ.get("XDG_STATE_HOME", "").strip() or os.path.join(
+        os.path.expanduser("~"), ".local", "state"
+    )
+
+
+def service_password():
     path = os.path.join(config_home(), "opencode", "service.json")
     try:
         with open(path, "r", encoding="utf-8") as handle:
             raw = json.load(handle)
     except (OSError, ValueError):
-        return False
-    return isinstance(raw, dict) and isinstance(raw.get("password"), str) and bool(raw["password"])
+        raw = None
+    if isinstance(raw, dict) and isinstance(raw.get("password"), str) and raw["password"]:
+        return raw["password"]
+
+    # Newer OpenCode versions keep the daemon credential in a private state
+    # file and expose it through `opencode service password`.
+    path = os.path.join(state_home(), "opencode", "password")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def has_password_command(opencode_bin):
+    code, out = run([opencode_bin, "service", "--help"], 8)
+    return code == 0 and any(line.strip().startswith("password") for line in out.splitlines())
+
+
+def set_service_password(opencode_bin, password):
+    command = [opencode_bin, "service", "password", password] if has_password_command(opencode_bin) else [
+        opencode_bin, "service", "set", "password", password
+    ]
+    code, _ = run(command, 15)
+    return code == 0
+
+
+def ensure_service_password(opencode_bin, rotate=False):
+    if not rotate and service_password():
+        return True
+    generated = secrets.token_urlsafe(32)
+    return set_service_password(opencode_bin, generated) and bool(service_password())
+
+
+def copy_service_password():
+    password = service_password()
+    clipboard_bin = shutil.which("wl-copy")
+    if not password:
+        return fail("OpenCode has no login password; enable remote access first")
+    if not clipboard_bin:
+        return fail("wl-copy is not installed")
+    try:
+        completed = subprocess.run(
+            [clipboard_bin], input=password, text=True, check=False, timeout=5
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return fail("could not copy the login password")
+    if completed.returncode != 0:
+        return fail("could not copy the login password")
+    print("Login password copied")
+    return 0
+
+
+def show_service_password():
+    password = service_password()
+    if not password:
+        return fail("OpenCode has no login password; enable remote access first")
+    # This is consumed by a private QML process pipe after an explicit reveal
+    # action. It is never added to command arguments, logs, or plugin config.
+    print(password)
+    return 0
 
 
 def tailscale_identity(tailscale_bin):
@@ -66,13 +132,18 @@ def tailscale_identity(tailscale_bin):
     return ipv4, dns
 
 
-def main():
+def publish(rotate=False):
     opencode_bin = shutil.which("opencode")
     tailscale_bin = shutil.which("tailscale")
     if not opencode_bin:
         return fail("opencode is not installed")
     if not tailscale_bin:
         return fail("tailscale is not installed")
+
+    # Establish a persistent credential before exposing the service on the
+    # tailnet. OpenCode owns the credential; this plugin never stores a copy.
+    if not ensure_service_password(opencode_bin, rotate=rotate):
+        return fail("could not configure a persistent OpenCode password")
 
     tail_ip, dns = tailscale_identity(tailscale_bin)
     if not tail_ip or not dns:
@@ -91,7 +162,7 @@ def main():
     code, _ = run([opencode_bin, "service", "start"], 30)
     if code != 0:
         return fail("could not start the OpenCode background service")
-    if not service_has_password():
+    if not service_password():
         return fail("OpenCode service has no password; refusing to publish it")
 
     target = "http://%s:%d" % (tail_ip, port)
@@ -101,6 +172,19 @@ def main():
 
     print("Published at https://%s/" % dns)
     return 0
+
+
+def main():
+    action = sys.argv[1] if len(sys.argv) > 1 else "publish"
+    if action == "publish":
+        return publish()
+    if action == "copy-password":
+        return copy_service_password()
+    if action == "show-password":
+        return show_service_password()
+    if action == "rotate-password":
+        return publish(rotate=True)
+    return fail("unknown action: %s" % action)
 
 
 if __name__ == "__main__":

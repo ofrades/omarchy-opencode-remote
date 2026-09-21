@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Remote access now establishes a persistent OpenCode password before exposing
+  the service, with compatibility for both current and newer OpenCode V2 CLIs.
+- Added clear remote-login instructions, username display, password copy, and
+  an explicit 30-second password reveal for signing in from another device.
+- Added confirmed password rotation and clearer login guidance for discovered
+  remote machines.
+
 ## 0.6.0
 
 - Reframed the plugin as a local OpenCode publisher. Each machine now manages

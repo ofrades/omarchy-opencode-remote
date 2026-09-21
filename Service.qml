@@ -21,6 +21,9 @@ Item {
   property var peers: []
   property bool published: false
   property string publicUrl: ""
+  property bool passwordConfigured: false
+  property string loginUsername: "opencode"
+  property string revealedPassword: ""
   property bool refreshing: false
   property string actionStatus: ""
   property string lastError: ""
@@ -56,16 +59,34 @@ Item {
     peers = parsed.tailscale.peers
     published = parsed.publication.published
     publicUrl = parsed.publication.url
+    passwordConfigured = parsed.authentication.configured
+    loginUsername = parsed.authentication.username
     lastError = parsed.lastError
   }
 
-  function publish() {
+  function runAction(status, action) {
     if (busy) return
-    actionStatus = "Publishing OpenCode…"
+    actionStatus = status
     lastError = ""
-    actionProcess.command = [publishPath]
+    actionProcess.output = ""
+    actionProcess.errorOutput = ""
+    actionProcess.command = [publishPath, action]
     actionProcess.running = true
   }
+
+
+  function publish() { runAction("Publishing OpenCode…", "publish") }
+  function copyPassword() { runAction("Copying login password…", "copy-password") }
+  function rotatePassword() { runAction("Changing login password…", "rotate-password") }
+  function revealPassword() {
+    if (passwordProcess.running) return
+    revealedPassword = ""
+    passwordProcess.output = ""
+    passwordProcess.errorOutput = ""
+    passwordProcess.command = [publishPath, "show-password"]
+    passwordProcess.running = true
+  }
+  function hidePassword() { revealedPassword = "" }
 
   function openUrl(url) {
     var value = String(url || "")
@@ -80,6 +101,7 @@ Item {
   Timer { interval: root.refreshIntervalSec * 1000; repeat: true; running: true; triggeredOnStart: true; onTriggered: root.refresh() }
   Timer { id: delayedRefresh; interval: 1000; repeat: false; onTriggered: root.refresh() }
   Timer { id: statusTimer; interval: 2600; repeat: false; onTriggered: root.actionStatus = "" }
+  Timer { id: hidePasswordTimer; interval: 30000; repeat: false; onTriggered: root.hidePassword() }
 
   Process {
     id: statusProcess
@@ -106,6 +128,23 @@ Item {
       else { root.actionStatus = ""; root.lastError = Model.elideStatus(errorOutput || output || "Publishing failed") }
       statusTimer.restart()
       delayedRefresh.restart()
+    }
+  }
+
+  Process {
+    id: passwordProcess
+    property string output: ""
+    property string errorOutput: ""
+    command: []
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: passwordProcess.output = text }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: passwordProcess.errorOutput = text }
+    onExited: function(code) {
+      if (code === 0) {
+        root.revealedPassword = String(output || "").trim()
+        hidePasswordTimer.restart()
+      } else {
+        root.lastError = Model.elideStatus(errorOutput || "Could not reveal the login password")
+      }
     }
   }
 }

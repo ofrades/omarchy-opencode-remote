@@ -15,6 +15,7 @@ Panel {
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
   property bool showHistory: false
+  property bool confirmPasswordRotation: false
   property string currentTab: "local"
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
@@ -32,7 +33,7 @@ Panel {
       : "Remote access needs attention"
 
   function open() { refresh(); controller.show() }
-  function close() { controller.hide() }
+  function close() { confirmPasswordRotation = false; service.hidePassword(); controller.hide() }
   function toggle() { if (opened) close(); else open() }
   function refresh() { service.refresh() }
   function switchPanel(direction) {
@@ -153,6 +154,74 @@ Panel {
             }
 
             ActionRow { visible: service.published; title: "Open dashboard"; subtitle: "Open OpenCode in your browser"; onClicked: { service.openDashboard(); root.close() } }
+
+            Column {
+              visible: service.passwordConfigured
+              width: parent.width
+              spacing: Style.space(6)
+
+              PanelSectionHeader { text: "LOGIN"; foreground: root.foreground; fontFamily: root.fontFamily }
+
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: "On another Tailscale device, open the remote URL. When OpenCode asks you to sign in, use these credentials. The password stays fixed across restarts."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+
+
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: "Username  " + service.loginUsername
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Text {
+                visible: service.revealedPassword !== ""
+                width: parent.width
+                textFormat: Text.PlainText
+                text: "Password  " + service.revealedPassword
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WrapAnywhere
+              }
+
+              ActionRow {
+                title: "Copy login password"
+                subtitle: "For a browser or password manager on this device"
+                onClicked: service.copyPassword()
+              }
+
+
+              ActionRow {
+                title: service.revealedPassword === "" ? "Show login password" : "Hide login password"
+                subtitle: service.revealedPassword === "" ? "Read it when signing in on another device" : "Automatically hidden after 30 seconds"
+                onClicked: {
+                  if (service.revealedPassword === "") service.revealPassword()
+                  else service.hidePassword()
+                }
+              }
+
+              ActionRow {
+                title: root.confirmPasswordRotation ? "Confirm password change" : "Change login password"
+                subtitle: root.confirmPasswordRotation ? "Existing browser logins will need the new password" : "Generate a new strong, persistent password"
+                onClicked: {
+                  if (root.confirmPasswordRotation) {
+                    root.confirmPasswordRotation = false
+                    service.rotatePassword()
+                  } else {
+                    root.confirmPasswordRotation = true
+                  }
+                }
+              }
+            }
           }
 
           Column {
@@ -220,7 +289,7 @@ Panel {
               ActionRow {
                 required property var modelData
                 title: String(modelData.hostName || "OpenCode server")
-                subtitle: (modelData.loginRequired === true ? "Login required · " : "") + String(modelData.dnsName || modelData.url || "")
+                subtitle: (modelData.loginRequired === true ? "Use that machine’s OpenCode password · " : "") + String(modelData.dnsName || modelData.url || "")
                 onClicked: { service.openPeer(modelData); root.close() }
               }
             }

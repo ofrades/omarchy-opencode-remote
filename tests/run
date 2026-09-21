@@ -11,7 +11,7 @@ python3 opencode_remote_status.py | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 assert d.get("ok") is True
-assert set(("opencode", "local", "tailscale", "publication")) <= set(d)
+assert set(("opencode", "local", "tailscale", "publication", "authentication")) <= set(d)
 assert isinstance(d["local"]["sessions"], list)
 assert isinstance(d["local"]["history"], list)
 assert isinstance(d["publication"]["published"], bool)
@@ -61,6 +61,16 @@ assert os.path.exists(os.path.join(downloads, "opencode-pair-unrelated.json"))
 rm -rf "$MIGRATION_HOME"
 echo OK
 
+echo "== password reveal =="
+PASSWORD_HOME="$(mktemp -d)"
+mkdir -p "$PASSWORD_HOME/opencode"
+cat > "$PASSWORD_HOME/opencode/service.json" <<'JSON'
+{"password":"stable-test-password"}
+JSON
+test "$(XDG_CONFIG_HOME="$PASSWORD_HOME" ./opencode-remote-publish show-password)" = "stable-test-password"
+rm -rf "$PASSWORD_HOME"
+echo OK
+
 if command -v node >/dev/null 2>&1; then
   echo "== model =="
   node - <<'JS'
@@ -69,11 +79,13 @@ const parsed = M.parseStatus(JSON.stringify({
   opencode: { installed: true, version: '2.0.0' },
   local: { reachable: true, total: 1, sessions: [{ id: 'ses_abc', title: 'Build', webUrl: 'https://host/session' }] },
   tailscale: { installed: true, running: true, selfName: 'laptop', selfIps: ['100.1.1.2'], peers: [{ hostName: 'desktop', dnsName: 'desktop.example.ts.net', online: true, detected: true, loginRequired: true, url: 'https://desktop.example.ts.net/' }] },
-  publication: { published: true, url: 'https://laptop.example.ts.net/' }
+  publication: { published: true, url: 'https://laptop.example.ts.net/' },
+  authentication: { configured: true, username: 'opencode' }
 }))
 console.assert(parsed.local.sessions.length === 1, 'session parse')
 console.assert(parsed.local.sessions[0].webUrl === 'https://host/session', 'web URL parse')
 console.assert(parsed.publication.published === true, 'publication parse')
+console.assert(parsed.authentication.configured === true && parsed.authentication.username === 'opencode', 'authentication parse')
 console.assert(parsed.tailscale.peers.length === 1 && parsed.tailscale.peers[0].loginRequired === true, 'peer parse')
 console.assert(M.relativeTime(new Date().toISOString()) === 'Just now', 'relative time')
 console.log('Model.js OK')

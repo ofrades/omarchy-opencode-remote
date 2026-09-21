@@ -5,6 +5,7 @@ function defaultStatus() {
     local: { reachable: false, url: "", error: "", sessions: [], history: [], total: 0 },
     tailscale: { installed: false, running: false, selfName: "", selfIps: [], peers: [] },
     publication: { published: false, url: "" },
+    authentication: { configured: false, username: "opencode" },
     lastError: ""
   }
 }
@@ -64,6 +65,10 @@ function parseStatus(raw) {
     if (parsed.publication) {
       result.publication.published = parsed.publication.published === true
       result.publication.url = String(parsed.publication.url || "")
+    }
+    if (parsed.authentication) {
+      result.authentication.configured = parsed.authentication.configured === true
+      result.authentication.username = String(parsed.authentication.username || "opencode")
     }
     result.lastError = String(parsed.lastError || "")
     return result
